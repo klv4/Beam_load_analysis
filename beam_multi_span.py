@@ -71,6 +71,13 @@ class DesignCriteria:
     factor_selfweight_partition: float = 1.0   # applied to self-weight + partitions + wall
     factor_finishes: float = 1.35              # applied to finishes
     factor_live: float = 1.5                   # applied to live loads
+    # Reporting-only fields (BS 8110-1:1997 Tables 3.3 & 3.4) — no effect on the calculation,
+    # included so the PDF report matches the spreadsheet's "Design Criteria & Materials" table.
+    concrete_grade: str = "Grade 25"
+    steel_grade: str = "High Yield Steel"
+    exposure_condition: str = "Mild"
+    fire_resistance_hours: float = 1.5
+    concrete_cover_mm: float = 25
 
 
 # ============================================================
@@ -374,53 +381,233 @@ class BeamSystem:
         plt.close(fig)
         return filename
 
-    # -------------------- STEP 12: PDF report --------------------
+
+    # -------------------- STEP 12: PDF report (matches the Excel layout) --------------------
     def generate_pdf(self, filename: str = "beam_report.pdf") -> str:
-        p = self.project
+        """
+        Builds a PDF using real gridded tables that mirror the source
+        spreadsheet's sections exactly (Slab Loading & Factoring, Wall
+        Loading, Design Criteria & Materials, Load Distribution, Support
+        Reactions, Total Support Reactions), with the 'Design Ref.' code
+        citation on the left and the headline 'Output' on the right of each
+        table, matching columns A and K of the sheet.
+        """
+        p, dc = self.project, self.dc
+        BLUE = '#1F4E78'
+        LEFT, RIGHT = 0.05, 0.95
+        REF_W, OUT_W = 0.11, 0.14
+        TABLE_X0, TABLE_X1 = LEFT + REF_W, RIGHT - OUT_W
+        TOP, BOTTOM = 0.96, 0.05
+
+        pages = []
+        fig, ax, y = None, None, TOP
+
+        def new_page():
+            nonlocal fig, ax, y
+            fig = plt.figure(figsize=(9.0, 12.4))
+            ax = fig.add_axes([0, 0, 1, 1])
+            ax.axis('off'); ax.set_xlim(0, 1); ax.set_ylim(0, 1); ax.set_autoscale_on(False)
+            ax.text(LEFT, 0.985, "DESIGN REF", fontsize=7, fontweight='bold', color='#888888',
+                    transform=ax.transAxes)
+            ax.text(TABLE_X1 + 0.01, 0.985, "OUTPUT", fontsize=7, fontweight='bold', color='#888888',
+                    transform=ax.transAxes)
+            ax.plot([0, 1], [0.978, 0.978], color='#CCCCCC', lw=0.6, transform=ax.transAxes)
+            y = TOP
+            pages.append(fig)
+
+        def ensure_space(h):
+            nonlocal y
+            if y - h < BOTTOM:
+                new_page()
+
+        def section_title(text):
+            nonlocal y
+            ensure_space(0.05)
+            ax.add_patch(patches.Rectangle((0, y - 0.022), 1, 0.028, transform=ax.transAxes,
+                                            facecolor=BLUE, edgecolor='none', zorder=1))
+            ax.text(0.5, y - 0.008, text, fontsize=10.5, fontweight='bold', color='white',
+                    ha='center', va='center', zorder=2, transform=ax.transAxes)
+            y -= 0.038
+
+        def side_note(ref="", output=""):
+            """Attach a Design Ref (left) / Output (right) note aligned to the table about to be drawn."""
+            nonlocal y
+            if ref:
+                ax.text(LEFT, y, ref, fontsize=7.2, color='#666666', style='italic', va='top',
+                        transform=ax.transAxes, wrap=True)
+            if output:
+                ax.text(TABLE_X1 + 0.01, y, output, fontsize=7.6, color=BLUE, fontweight='bold',
+                        va='top', transform=ax.transAxes)
+
+        def table(headers, rows, col_fracs, row_h=0.021, fontsize=7.3, ref="", output=""):
+            """Draws a bordered grid table via ax.table, anchored at the current y cursor."""
+            nonlocal y
+            n_rows = len(rows) + 1
+            height = row_h * n_rows
+            ensure_space(height + 0.01)
+            y0 = y - height
+            width = TABLE_X1 - TABLE_X0
+            side_note(ref, output)
+            tbl = ax.table(cellText=rows, colLabels=headers,
+                            bbox=[TABLE_X0, y0, width, height],
+                            colWidths=col_fracs, cellLoc='center')
+            tbl.auto_set_font_size(False)
+            tbl.set_fontsize(fontsize)
+            for j in range(len(headers)):
+                cell = tbl[0, j]
+                cell.set_facecolor(BLUE)
+                cell.get_text().set_color('white')
+                cell.get_text().set_fontweight('bold')
+                cell.get_text().set_fontsize(fontsize)
+            for (r, c), cell in tbl.get_celld().items():
+                cell.set_edgecolor('#AAAAAA')
+                cell.set_linewidth(0.5)
+            y = y0 - 0.012
+            return tbl
+
+        def text_line(txt, fontsize=8.3, bold=False, indent=0.0):
+            nonlocal y
+            ensure_space(0.02)
+            ax.text(TABLE_X0 + indent, y, txt, fontsize=fontsize,
+                    fontweight='bold' if bold else 'normal', va='top', transform=ax.transAxes)
+            y -= 0.02
+
+        new_page()
+
+        # ---- Project header ----
+        ax.text(LEFT, y, p.firm_name, fontsize=16, fontweight='bold', transform=ax.transAxes)
+        y -= 0.026
+        ax.text(LEFT, y, p.address, fontsize=8.5, transform=ax.transAxes)
+        y -= 0.035
+        header_rows = [
+            ["Job No.", p.job_no, "Designer", p.designer, "Date", p.date],
+            ["Element", p.element, "", "", "Material", p.material],
+            ["Type", p.beam_type, "Spans", str(len(self.spans)), "Revision", p.revision],
+            ["Location", p.location, "Calc. Sheet No.", p.calc_sheet_no, "", ""],
+        ]
+        table([""] * 6, header_rows, [0.13, 0.22, 0.13, 0.19, 0.11, 0.22], row_h=0.02, fontsize=7.6)
+
+        # ---- SLAB LOADING AND FACTORING ----
+        section_title("SLAB LOADING AND FACTORING")
+        headers = ["Panel", "Self Weight\n(kN/m2)", "Finishes\n(kN/m2)", "Partition\n(kN/m2)",
+                   "Live Loads\n(kN/m2)", "Dead nGk\n(kN/m2)", "Live nQk\n(kN/m2)"]
+        rows = []
+        for i, pnl in self.panels.items():
+            rows.append([str(i), f"{pnl.self_weight_kNm2(dc):.3f}", f"{pnl.finishes_kNm2:.2f}",
+                        f"{pnl.partition_kNm2(dc):.3f}", f"{pnl.live_kNm2:.2f}",
+                        f"{pnl.dead_kNm2(dc):.3f}", f"{pnl.live_kNm2_factored(dc):.3f}"])
+        table(headers, rows, [0.10, 0.16, 0.14, 0.16, 0.14, 0.15, 0.15],
+              ref="BS 6399-1:1996\nTable 1")
+
+        # ---- WALL LOADING ----
+        section_title("WALL LOADING")
+        headers = ["Present\nanywhere", "Thickness (m)", "Height (m)", "Load (kN/m)", "Factored nGk (kN/m)"]
+        any_wall = any(s.wall_present for s in self.spans)
+        rows = [["Yes" if any_wall else "No", f"{self.wall.thickness_m}", f"{self.wall.height_m}",
+                 f"{self.wall.thickness_m*self.wall.height_m*dc.wall_density:.3f}",
+                 f"{self.wall.factored_dead_kNm(dc):.3f}"]]
+        table(headers, rows, [0.2, 0.2, 0.2, 0.2, 0.2], ref="BS 8110-1:1997",
+              output=f"nGk={self.wall.factored_dead_kNm(dc):.3f} kN/m")
+
+        # ---- DESIGN CRITERIA & MATERIALS ----
+        section_title("DESIGN CRITERIA & MATERIALS")
+        headers = ["Parameter", "Value", "Unit"]
+        rows = [
+            ["Concrete Density", f"{dc.concrete_density:.0f}", "kN/m3"],
+            ["Wall Material Density", f"{dc.wall_density:.0f}", "kN/m3"],
+            ["Finishes — Open Areas", f"{FINISHES_OPTIONS['1'][1]}", "kN/m2"],
+            ["Finishes — Residential", f"{FINISHES_OPTIONS['2'][1]}", "kN/m2"],
+            ["Live Load — Open Areas", f"{LIVE_LOAD_OPTIONS['1'][1]}", "kN/m2"],
+            ["Live Load — Residential", f"{LIVE_LOAD_OPTIONS['2'][1]}", "kN/m2"],
+            ["Dead Load Factor (self-wt/partition)", f"{dc.factor_selfweight_partition}", "-"],
+            ["Dead Load Factor (finishes)", f"{dc.factor_finishes}", "-"],
+            ["Live Load Factor", f"{dc.factor_live}", "-"],
+            ["Concrete Characteristic Strength (fcu)", dc.concrete_grade, "-"],
+            ["Reinforcement Yield Strength (fy)", dc.steel_grade, "-"],
+            ["Exposure Conditions", dc.exposure_condition, "-"],
+            ["Fire Resistance", f"{dc.fire_resistance_hours}", "Hours"],
+            ["Concrete Cover", f"{dc.concrete_cover_mm:.0f}", "mm"],
+        ]
+        table(headers, rows, [0.55, 0.25, 0.2], row_h=0.019,
+              ref="BS 6399-1:1996 Table 1\nEN 1990-1:2002 A1.2(B)\nBS 8110-1:1997 3.3 & 3.4",
+              output=f"Provide {dc.concrete_cover_mm:.0f}mm Cover")
+
+        # ---- Per-span sections ----
+        labels = self.support_labels()
+        for i, s in enumerate(self.spans):
+            RL, RR = s.reactions()
+
+            # -- Load distribution to beam --
+            section_title(f"LOAD DISTRIBUTION TO BEAM — SPAN {i+1} ({labels[i]} -> {labels[i+1]})")
+            headers = ["Panel", "Position", "Dist.\nFactor", "Lx (m)", "Dead nGk\n(kN/m)", "Live nQk\n(kN/m)"]
+            rows = []
+            for pid, pos, dead, live in s.distribution_rows:
+                crit = s.governing.get(pos, {})
+                tag = " *" if crit.get('panel_id') == pid else ""
+                rows.append([f"{pid}{tag}", pos, f"{[c.distribution_factor for c in s.contributions if c.panel_id==pid and c.position==pos][0]:.2f}",
+                            f"{self.panels[pid].lx_m:.2f}", f"{dead:.4f}", f"{live:.4f}"])
+            if not rows:
+                rows = [["-", "-", "-", "-", "0", "0"]]
+            table(headers, rows, [0.13, 0.22, 0.14, 0.13, 0.19, 0.19],
+                  ref="* = critical/governing\npanel on that side")
+            crit_panels = sorted({g['panel_id'] for g in s.governing.values()})
+            text_line(f"Take: " + ", ".join(f"Panel {pid}" for pid in crit_panels) if crit_panels
+                      else "Take: (no panels assigned)", fontsize=7.8)
+            text_line(f"Wall Loads Present: {'Yes' if s.wall_present else 'No'}"
+                      + (f"    Self-weight: {s.self_weight_kNm:.3f} kN/m" if s.self_weight_kNm else ""),
+                      fontsize=7.8)
+            side_note(output=f"nGk={s.udl_dead:.4f} kN/m\nnQk={s.udl_live:.4f} kN/m")
+            text_line(f"Total Uniformly Distributed Load (UDL):   "
+                      f"Gk = {s.udl_dead:.4f} kN/m     Qk = {s.udl_live:.4f} kN/m", bold=True)
+            y -= 0.008
+
+            # -- Support reactions --
+            section_title(f"SUPPORT REACTIONS — SPAN {i+1}")
+            headers = ["Load Type", "Dead nGk\n(kN/m or kN)", "Live nQk\n(kN/m or kN)", "Position\nfrom left",
+                       f"Dead {labels[i]}\n(kN)", f"Live {labels[i]}\n(kN)",
+                       f"Dead {labels[i+1]}\n(kN)", f"Live {labels[i+1]}\n(kN)"]
+            rows = [["udl", f"{s.udl_dead:.4f}", f"{s.udl_live:.4f}", f"{s.length_m:.2f}",
+                    f"{s.udl_dead*s.length_m/2:.4f}" if s.left_condition == "Pin" and s.right_condition == "Pin" else "-",
+                    f"{s.udl_live*s.length_m/2:.4f}" if s.left_condition == "Pin" and s.right_condition == "Pin" else "-",
+                    f"{s.udl_dead*s.length_m/2:.4f}" if s.left_condition == "Pin" and s.right_condition == "Pin" else "-",
+                    f"{s.udl_live*s.length_m/2:.4f}" if s.left_condition == "Pin" and s.right_condition == "Pin" else "-"]]
+            for pl in s.point_loads:
+                left_d = pl.dead_kN * (s.length_m - pl.position_m) / s.length_m
+                left_l = pl.live_kN * (s.length_m - pl.position_m) / s.length_m
+                right_d = pl.dead_kN * pl.position_m / s.length_m
+                right_l = pl.live_kN * pl.position_m / s.length_m
+                rows.append([pl.label, f"{pl.dead_kN:.2f}", f"{pl.live_kN:.2f}", f"{pl.position_m:.2f}",
+                            f"{left_d:.4f}", f"{left_l:.4f}", f"{right_d:.4f}", f"{right_l:.4f}"])
+            rows.append(["Total", "", "", "", f"{RL['dead']:.2f}", f"{RL['live']:.2f}",
+                        f"{RR['dead']:.2f}", f"{RR['live']:.2f}"])
+            table(headers, rows, [0.09, 0.13, 0.13, 0.10, 0.14, 0.14, 0.14, 0.13], fontsize=6.9,
+                  output=f"R{labels[i]}: {RL['dead']:.1f}/{RL['live']:.1f}\n"
+                         f"R{labels[i+1]}: {RR['dead']:.1f}/{RR['live']:.1f} kN")
+            y -= 0.012
+
+        # ---- TOTAL SUPPORT REACTIONS ----
+        section_title("TOTAL SUPPORT REACTIONS")
+        totals = self.support_reactions()
+        headers = ["Support", "Condition", "Dead nGk (kN)", "Live nQk (kN)", "Total (kN)"]
+        rows = []
+        for idx, lbl in enumerate(labels):
+            cond = self.support_condition_label(idx)
+            d, l = totals[lbl]['dead'], totals[lbl]['live']
+            rows.append([lbl, cond, f"{d:.2f}", f"{l:.2f}", f"{d+l:.2f}"])
+        gtot_d = sum(v['dead'] for v in totals.values())
+        gtot_l = sum(v['live'] for v in totals.values())
+        rows.append(["Beam Total", "", f"{gtot_d:.4f}", f"{gtot_l:.4f}", f"{gtot_d+gtot_l:.4f}"])
+        table(headers, rows, [0.16, 0.28, 0.2, 0.18, 0.18],
+              ref="Note: shared/interior\nsupports combine\nreactions from both\nadjacent spans.")
+
+        # ---- Diagram page ----
+        fig2, ax2 = plt.subplots(figsize=(11.69, 8.27))
+        self._draw(ax2)
+        pages.append(fig2)
+
         with PdfPages(filename) as pdf:
-            # ---- Page 1: project info + slab loading ----
-            fig = plt.figure(figsize=(8.27, 11.69))  # A4 portrait
-            fig.suptitle(p.firm_name, fontsize=16, fontweight='bold', x=0.08, ha='left', y=0.97)
-            fig.text(0.08, 0.945, p.address, fontsize=9)
-
-            header_lines = [
-                f"Job No.: {p.job_no}        Calc. Sheet No.: {p.calc_sheet_no}",
-                f"Designer: {p.designer}        Date: {p.date}        Revision: {p.revision}",
-                f"Element: {p.element}",
-                f"Type: {p.beam_type}        Spans: {len(self.spans)}",
-                f"Location: {p.location}        Material: {p.material}",
-            ]
-            fig.text(0.08, 0.90, "\n".join(header_lines), fontsize=9.5, va='top', family='monospace')
-
-            fig.text(0.08, 0.72, "SLAB LOADING & FACTORING", fontsize=11, fontweight='bold')
-            fig.text(0.08, 0.70, self.slab_loading_text().split("\n", 2)[-1],
-                     fontsize=8.5, va='top', family='monospace')
-
-            wall_text = (f"Wall on beam: thickness {self.wall.thickness_m} m, height {self.wall.height_m} m, "
-                         f"factored Gk = {self.wall.factored_dead_kNm(self.dc):.3f} kN/m")
-            fig.text(0.08, 0.50, "WALL LOADING", fontsize=11, fontweight='bold')
-            fig.text(0.08, 0.48, wall_text, fontsize=8.5, va='top')
-
-            fig.text(0.08, 0.40, "DESIGN CRITERIA", fontsize=11, fontweight='bold')
-            dc_text = (f"Concrete density = {self.dc.concrete_density} kN/m3\n"
-                       f"Wall density = {self.dc.wall_density} kN/m3\n"
-                       f"Load factors: self-weight/partition = {self.dc.factor_selfweight_partition}, "
-                       f"finishes = {self.dc.factor_finishes}, live = {self.dc.factor_live}")
-            fig.text(0.08, 0.38, dc_text, fontsize=8.5, va='top', family='monospace')
-            pdf.savefig(fig)
-            plt.close(fig)
-
-            # ---- Page 2: tabulated results ----
-            fig = plt.figure(figsize=(8.27, 11.69))
-            fig.text(0.08, 0.96, "TABULATED RESULTS", fontsize=13, fontweight='bold')
-            fig.text(0.06, 0.93, self.tabulate(), fontsize=7.6, va='top', family='monospace')
-            pdf.savefig(fig)
-            plt.close(fig)
-
-            # ---- Page 3: diagram ----
-            fig, ax = plt.subplots(figsize=(11.69, 8.27))  # landscape
-            self._draw(ax)
-            pdf.savefig(fig)
-            plt.close(fig)
+            for f in pages:
+                pdf.savefig(f)
+                plt.close(f)
 
         return filename
