@@ -85,7 +85,7 @@ class DesignCriteria:
 # ============================================================
 @dataclass
 class SlabPanel:
-    panel_id: int
+    panel_id: str
     thickness_mm: float
     ly_m: float
     lx_m: float
@@ -130,7 +130,7 @@ class WallLoad:
 # ============================================================
 @dataclass
 class PanelContribution:
-    panel_id: int
+    panel_id: str              # matches a SlabPanel.panel_id
     position: str              # e.g. "Left/Top" or "Right/Bottom"
     distribution_factor: float
 
@@ -166,7 +166,7 @@ class Span:
     distribution_rows: List[Tuple] = field(default_factory=list)
     governing: Dict[str, Dict] = field(default_factory=dict)   # STEP 7 — critical panel per side
 
-    def compute_udl(self, panels: Dict[int, SlabPanel], wall: WallLoad, dc: DesignCriteria):
+    def compute_udl(self, panels: Dict[str, SlabPanel], wall: WallLoad, dc: DesignCriteria):
         rows = []
         candidates: Dict[str, List[Tuple[int, float, float]]] = {}
         for c in self.contributions:
@@ -218,7 +218,7 @@ class Span:
 # The whole multi-span beam
 # ============================================================
 class BeamSystem:
-    def __init__(self, dc: DesignCriteria, panels: Dict[int, SlabPanel], wall: WallLoad,
+    def __init__(self, dc: DesignCriteria, panels: Dict[str, SlabPanel], wall: WallLoad,
                  project: Optional[ProjectInfo] = None):
         self.dc = dc
         self.panels = panels

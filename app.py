@@ -54,8 +54,14 @@ n_panels = st.number_input("Number of slab panels", min_value=1, max_value=10, v
 panels = {}
 fin_labels = {k: v[0] for k, v in FINISHES_OPTIONS.items()}
 live_labels = {k: v[0] for k, v in LIVE_LOAD_OPTIONS.items()}
+used_names = set()
 for i in range(1, int(n_panels) + 1):
-    with st.expander(f"Panel {i}", expanded=(i <= 2)):
+    default_name = f"P{i}"
+    name = st.text_input(f"Panel {i} — name/ID", value=default_name, key=f"pname{i}")
+    if name in used_names:
+        st.warning(f"'{name}' is already used by another panel — please make it unique.")
+    used_names.add(name)
+    with st.expander(f"Panel: {name}", expanded=(i <= 2)):
         c1, c2, c3 = st.columns(3)
         t = c1.number_input("Thickness (mm)", value=200, key=f"pt{i}")
         ly = c2.number_input("ly (m)", value=5.0, key=f"ply{i}")
@@ -72,7 +78,7 @@ for i in range(1, int(n_panels) + 1):
             plen = c6.number_input("Partition length (m)", value=5.0, key=f"pplen{i}")
             pthk = c7.number_input("Partition thickness (m)", value=0.2, key=f"ppthk{i}")
             pht = c8.number_input("Partition height (m)", value=2.7, key=f"ppht{i}")
-        panels[i] = SlabPanel(i, t, ly, lx, FINISHES_OPTIONS[fin_key][1], LIVE_LOAD_OPTIONS[live_key][1],
+        panels[name] = SlabPanel(name, t, ly, lx, FINISHES_OPTIONS[fin_key][1], LIVE_LOAD_OPTIONS[live_key][1],
                                has_partition, plen, pthk, pht)
         st.caption(f"-> Gk = {panels[i].dead_kNm2(dc):.3f} kN/m²   Qk = {panels[i].live_kNm2_factored(dc):.3f} kN/m²"
                    f"  (Step 5: calculated automatically)")

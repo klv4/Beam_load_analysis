@@ -122,8 +122,16 @@ def run_wizard():
     print("\nSTEP 3 — Slab panel properties")
     n_panels = ask_int("How many slab panels are there in total?", default=1)
     panels = {}
-    for i in range(1, n_panels + 1):
-        print(f"\n  Panel {i}:")
+    used_names = set()
+    for idx in range(n_panels):
+        default_name = f"P{idx+1}"
+        while True:
+            name = ask_str(f"\n  Panel {idx+1} — name/ID (e.g. 'Kitchen', 'RoofSlab', 'P{idx+1}')",
+                            default=default_name)
+            if name not in used_names:
+                used_names.add(name)
+                break
+            print(f"  '{name}' is already used for another panel — choose a different name.")
         thickness = ask_float("    Thickness (mm)", default=150)
         ly = ask_float("    ly — long dimension (m)", default=5)
         lx = ask_float("    lx — load width feeding the beam (m)", default=2)
@@ -138,8 +146,8 @@ def run_wizard():
             pthk = ask_float("      Partition thickness (m)", default=0.2)
             pht = ask_float("      Partition height (m)", default=2.7)
 
-        panels[i] = SlabPanel(i, thickness, ly, lx, finishes, live,
-                               has_partition, plen, pthk, pht)
+        panels[name] = SlabPanel(name, thickness, ly, lx, finishes, live,
+                                  has_partition, plen, pthk, pht)
 
     # ---------------- STEP 5: slab loading (auto) ----------------
     print("\nSTEP 5 — Slab loading calculation")
@@ -168,10 +176,15 @@ def run_wizard():
         print(f"\n--- Span {i+1} (length {span_lengths[i]} m) ---")
 
         print("STEP 7 — Load distribution: which panels touch this span?")
+        print(f"  Available panels: {', '.join(panels.keys())}")
         n_contrib = ask_int("  How many panel contributions on this span?", default=0)
         contributions = []
         for j in range(n_contrib):
-            pid = ask_int(f"    Contribution {j+1}: panel ID", default=1)
+            while True:
+                pid = ask_str(f"    Contribution {j+1}: panel name", default=next(iter(panels)))
+                if pid in panels:
+                    break
+                print(f"    '{pid}' isn't a defined panel — choose from: {', '.join(panels.keys())}")
             pos = ask_str(f"    Contribution {j+1}: position (e.g. Left/Top or Right/Bottom)",
                           default="Left/Top")
             factor = ask_float(f"    Contribution {j+1}: distribution factor", default=0.5)
