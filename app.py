@@ -80,7 +80,7 @@ for i in range(1, int(n_panels) + 1):
             pht = c8.number_input("Partition height (m)", value=2.7, key=f"ppht{i}")
         panels[name] = SlabPanel(name, t, ly, lx, FINISHES_OPTIONS[fin_key][1], LIVE_LOAD_OPTIONS[live_key][1],
                                has_partition, plen, pthk, pht)
-        st.caption(f"-> Gk = {panels[i].dead_kNm2(dc):.3f} kN/m²   Qk = {panels[i].live_kNm2_factored(dc):.3f} kN/m²"
+        st.caption(f"-> Gk = {panels[name].dead_kNm2(dc):.3f} kN/m²   Qk = {panels[name].live_kNm2_factored(dc):.3f} kN/m²"
                    f"  (Step 5: calculated automatically)")
 
 # ---------------- Step 6: wall ----------------
