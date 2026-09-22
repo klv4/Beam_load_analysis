@@ -232,8 +232,20 @@ class BeamSystem:
         self.spans.append(span)
 
     def support_labels(self) -> List[str]:
+        """A, B, ..., Z, AA, AB, ... — Excel-style, so it never runs out even
+        with a very large number of spans."""
         n = len(self.spans)
-        return [chr(65 + i) for i in range(n + 1)]
+        labels = []
+        for i in range(n + 1):
+            k = i
+            label = ""
+            while True:
+                label = chr(65 + k % 26) + label
+                k = k // 26 - 1
+                if k < 0:
+                    break
+            labels.append(label)
+        return labels
 
     def compute_all(self):
         for s in self.spans:

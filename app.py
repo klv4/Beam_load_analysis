@@ -36,12 +36,15 @@ project = ProjectInfo(
 
 # ---------------- Step 2: spans ----------------
 st.header("2. Spans")
-n_spans = st.number_input("Number of spans", min_value=1, max_value=8, value=2, step=1)
+n_spans = st.number_input("Number of spans", min_value=1, value=2, step=1)
 lengths = []
-cols = st.columns(int(n_spans))
-for i in range(int(n_spans)):
-    with cols[i]:
-        lengths.append(st.number_input(f"Span {i+1} length (m)", min_value=0.1, value=3.0 + i, step=0.1, key=f"L{i}"))
+ROW_SIZE = 6  # wrap span-length inputs into rows so large counts stay usable
+for row_start in range(0, int(n_spans), ROW_SIZE):
+    row_indices = range(row_start, min(row_start + ROW_SIZE, int(n_spans)))
+    cols = st.columns(len(row_indices))
+    for col, i in zip(cols, row_indices):
+        with col:
+            lengths.append(st.number_input(f"Span {i+1} length (m)", min_value=0.1, value=3.0 + i, step=0.1, key=f"L{i}"))
 
 c1, c2 = st.columns(2)
 start_cond = c1.selectbox("Condition at FIRST support (start of Span 1)", ["Pin", "Cantilever"])
@@ -50,7 +53,7 @@ st.caption("Interior/shared supports are always pinned and continuous.")
 
 # ---------------- Step 3 & 4: slab panels ----------------
 st.header("3-4. Slab panels & design criteria")
-n_panels = st.number_input("Number of slab panels", min_value=1, max_value=10, value=3, step=1)
+n_panels = st.number_input("Number of slab panels", min_value=1, value=3, step=1)
 panels = {}
 fin_labels = {k: v[0] for k, v in FINISHES_OPTIONS.items()}
 live_labels = {k: v[0] for k, v in LIVE_LOAD_OPTIONS.items()}
@@ -103,7 +106,7 @@ st.header("7-8. Load distribution, self-weight and point loads per span")
 for i in range(int(n_spans)):
     with st.expander(f"Span {i+1}  ({labels[i]} -> {labels[i+1]}, {lengths[i]} m)", expanded=(i == 0)):
         st.subheader("Panel contributions")
-        n_c = st.number_input("Number of panel contributions", min_value=0, max_value=8, value=2, step=1, key=f"nc{i}")
+        n_c = st.number_input("Number of panel contributions", min_value=0, value=2, step=1, key=f"nc{i}")
         contributions = []
         for j in range(int(n_c)):
             c1, c2, c3 = st.columns(3)
@@ -120,7 +123,7 @@ for i in range(int(n_spans)):
                                        value=0.0, step=0.1, key=f"s{i}sw")
 
         st.subheader("Point loads")
-        n_p = st.number_input("Number of point loads", min_value=0, max_value=6, value=0, step=1, key=f"np{i}")
+        n_p = st.number_input("Number of point loads", min_value=0, value=0, step=1, key=f"np{i}")
         point_loads = []
         for j in range(int(n_p)):
             c1, c2, c3, c4 = st.columns(4)
