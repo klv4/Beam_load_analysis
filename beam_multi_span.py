@@ -61,6 +61,8 @@ FINISHES_OPTIONS = {
 LIVE_LOAD_OPTIONS = {
     "1": ("Open Areas (Water tanks / Solar Panels)", 5.0),
     "2": ("Residential Areas (General occupancy)", 1.5),
+    "3": ("Offices & Bed Areas", 2.5),
+    "4": ("Corridors", 5.0),
 }
 
 
@@ -512,13 +514,13 @@ class BeamSystem:
         # ---- DESIGN CRITERIA & MATERIALS ----
         section_title("DESIGN CRITERIA & MATERIALS")
         headers = ["Parameter", "Value", "Unit"]
+        live_rows = [[f"Live Load — {label}", f"{val}", "kN/m2"] for label, val in LIVE_LOAD_OPTIONS.values()]
         rows = [
             ["Concrete Density", f"{dc.concrete_density:.0f}", "kN/m3"],
             ["Wall Material Density", f"{dc.wall_density:.0f}", "kN/m3"],
             ["Finishes — Open Areas", f"{FINISHES_OPTIONS['1'][1]}", "kN/m2"],
             ["Finishes — Residential", f"{FINISHES_OPTIONS['2'][1]}", "kN/m2"],
-            ["Live Load — Open Areas", f"{LIVE_LOAD_OPTIONS['1'][1]}", "kN/m2"],
-            ["Live Load — Residential", f"{LIVE_LOAD_OPTIONS['2'][1]}", "kN/m2"],
+            *live_rows,
             ["Dead Load Factor (self-wt/partition)", f"{dc.factor_selfweight_partition}", "-"],
             ["Dead Load Factor (finishes)", f"{dc.factor_finishes}", "-"],
             ["Live Load Factor", f"{dc.factor_live}", "-"],
