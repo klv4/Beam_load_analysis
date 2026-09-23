@@ -320,78 +320,152 @@ class BeamSystem:
         return "\n".join(out)
 
     # -------------------- STEP 11: graphical output --------------------
-    def _draw(self, ax):
+    def figure(self):
+        """Builds and returns the matplotlib Figure/Axes for the beam diagram
+        (a live vector plot — not a pre-rendered image). Callers can render
+        it directly (e.g. st.pyplot(fig)) or save it in whatever format they
+        need via fig.savefig(...)."""
         labels = self.support_labels()
         cum = [0.0]
         for s in self.spans:
             cum.append(cum[-1] + s.length_m)
         Ltot = cum[-1]
         totals = self.support_reactions()
+        n_spans = len(self.spans)
 
-        ax.set_xlim(-0.6, Ltot + 0.6)
-        ax.set_ylim(-3.4, 4.8)
+        # ---- proportional, stepped UDL block heights (this is the point of the redesign:
+        # each span's block height reflects its own Gk+Qk magnitude relative to the others,
+        # so spans visibly step up/down instead of all sitting on one flat line) ----
+        mags = [s.udl_dead + s.udl_live for s in self.spans]
+        max_mag = max(mags) if mags and max(mags) > 0 else 1.0
+        block_h = [0.6 + 1.8 * (m / max_mag) for m in mags]
+
+        # reserve enough left margin for the reaction table's row-label column
+        col_half_preview = min([cum[i + 1] - cum[i] for i in range(n_spans)] + [Ltot]) / 2 if n_spans else 0.6
+        col_half_preview = max(col_half_preview, 0.35)
+        left_margin = 1.95 * col_half_preview + 0.15
+
+        fig, ax = plt.subplots(figsize=(max(7, Ltot * 1.7), 8.5))
+        ax.set_xlim(-max(0.6, left_margin), Ltot + 0.6)
+
+        top = max(block_h) + 2.2   # headroom for point-load arrows/labels above the tallest block
+        bottom = -4.6 - 0.3 * max(0, n_spans - 1)  # extra room if the reaction table needs to wrap
+        ax.set_ylim(bottom, top + 0.6)
         ax.axis('off')
 
-        BEAM_Y, BEAM_H = 0, max(0.015 * Ltot, 0.03)
+        BEAM_Y, BEAM_H = 0, max(0.012 * Ltot, 0.025)
         ax.add_patch(patches.Rectangle((0, BEAM_Y - BEAM_H / 2), Ltot, BEAM_H,
-                                        facecolor='#F2C9CE', edgecolor='black', zorder=5))
+                                        facecolor='#F2C9CE', edgecolor='black', zorder=6))
 
         def draw_support(x, label, free):
-            sN = 0.045 * max(Ltot, 1) + 0.05
+            sN = 0.035 * max(Ltot, 1) + 0.04
             if free:
                 ax.plot(x, BEAM_Y, marker='o', markersize=6, color='white',
-                         markeredgecolor='black', zorder=6)
+                         markeredgecolor='black', zorder=7)
             else:
                 tri = patches.Polygon([(x - sN, -sN * 2.2), (x + sN, -sN * 2.2), (x, BEAM_Y - BEAM_H / 2)],
-                                       closed=True, facecolor='white', edgecolor='black', zorder=6)
+                                       closed=True, facecolor='white', edgecolor='black', zorder=7)
                 ax.add_patch(tri)
-                ax.plot([x - sN * 2, x + sN * 2], [-sN * 2.2] * 2, color='black', lw=1.2, zorder=6)
-            ax.text(x, -sN * 2.2 - 0.18, label, ha='center', va='top', fontsize=12, fontweight='bold')
+                ax.plot([x - sN * 2, x + sN * 2], [-sN * 2.2] * 2, color='black', lw=1.2, zorder=7)
+            ax.text(x, -sN * 2.2 - 0.16, label, ha='center', va='top', fontsize=11, fontweight='bold')
 
         for i, lbl in enumerate(labels):
             is_free = ((i == 0 and self.spans[0].left_condition == "Cantilever") or
                        (i == len(labels) - 1 and self.spans[-1].right_condition == "Cantilever"))
             draw_support(cum[i], lbl, is_free)
 
+        # ---- stepped UDL blocks + point loads, per span ----
         for i, s in enumerate(self.spans):
             x0, x1 = cum[i], cum[i + 1]
-            n = max(int(s.length_m * 3), 2) + 1
-            y_top = 1.0
-            for k in range(n):
-                xi = x0 + k * (x1 - x0) / (n - 1)
-                ax.annotate('', xy=(xi, BEAM_Y + BEAM_H / 2), xytext=(xi, y_top),
-                            arrowprops=dict(arrowstyle='->', lw=1.1, color='#1F4E78'))
-            ax.plot([x0, x1], [y_top, y_top], color='#1F4E78', lw=1.1)
-            ax.text((x0 + x1) / 2, y_top + 0.08,
-                    f"Gk={s.udl_dead:.2f}  Qk={s.udl_live:.2f} kN/m",
-                    ha='center', va='bottom', fontsize=9.5, color='#1F4E78', fontweight='bold')
+            h = block_h[i]
+            ax.add_patch(patches.Rectangle((x0, BEAM_Y + BEAM_H / 2), x1 - x0, h,
+                                            facecolor='#DCE8F5', edgecolor='#1F4E78', lw=1.3, zorder=2))
+            # boundary uparrows (left & right edge of this span's block, beam -> block top)
+            for xe in (x0, x1):
+                ax.annotate('', xy=(xe, h), xytext=(xe, BEAM_Y + BEAM_H / 2),
+                            arrowprops=dict(arrowstyle='-|>', lw=1.3, color='#1F4E78', mutation_scale=12))
+            ax.text((x0 + x1) / 2, h + 0.08,
+                    f"nGk = {s.udl_dead:.2f} kN/m\nnQk = {s.udl_live:.2f} kN/m",
+                    ha='center', va='bottom', fontsize=8.8, color='#1F4E78', fontweight='bold')
 
-            heights = [1.8, 2.3, 2.8, 3.3]
+            heights = [0.7, 1.25, 1.8, 2.35]
             for j, p in enumerate(s.point_loads):
                 xp = x0 + p.position_m
-                h = heights[j % len(heights)]
-                ax.annotate('', xy=(xp, BEAM_Y + BEAM_H / 2 + 0.02), xytext=(xp, h),
-                            arrowprops=dict(arrowstyle='-|>', lw=2.2, color='#8B1E2E', mutation_scale=18))
-                ax.text(xp, h + 0.08, f"{p.label}: {p.dead_kN:.1f}/{p.live_kN:.1f}kN",
-                        ha='center', va='bottom', fontsize=8, color='#8B1E2E', fontweight='bold')
+                ph = h + heights[j % len(heights)]
+                ax.annotate('', xy=(xp, BEAM_Y + BEAM_H / 2 + 0.02), xytext=(xp, ph),
+                            arrowprops=dict(arrowstyle='-|>', lw=2.1, color='#8B1E2E', mutation_scale=16))
+                ax.text(xp, ph + 0.06, f"{p.label}: Gk={p.dead_kN:.1f} Qk={p.live_kN:.1f}kN",
+                        ha='center', va='bottom', fontsize=7.6, color='#8B1E2E', fontweight='bold')
 
-            ax.text((x0 + x1) / 2, -2.35, f"SPAN {i+1} = {s.length_m:.2f} m",
-                    ha='center', va='top', fontsize=9, color='#1F4E78')
+        # ---- two-tier dimension lines ----
+        def dim_line(x0, x1, y, text, color='#333333'):
+            ax.annotate('', xy=(x1, y), xytext=(x0, y),
+                        arrowprops=dict(arrowstyle='<->', lw=0.8, color=color))
+            ax.plot([x0, x0], [y - 0.05, y + 0.05], color=color, lw=0.8)
+            ax.plot([x1, x1], [y - 0.05, y + 0.05], color=color, lw=0.8)
+            ax.text((x0 + x1) / 2, y - 0.09, text, ha='center', va='top', fontsize=7.6, color=color)
 
+        # Tier 1: every defining point (supports + point-load positions), left to right
+        points_x = sorted(set([round(c, 6) for c in cum] +
+                              [round(cum[i] + p.position_m, 6) for i, s in enumerate(self.spans)
+                               for p in s.point_loads]))
+        y_tier1 = -0.55
+        for a, b in zip(points_x[:-1], points_x[1:]):
+            dim_line(a, b, y_tier1, f"{(b - a):.2f} m")
+
+        # Tier 2: overall span lengths
+        y_tier2 = -0.95
+        for i, s in enumerate(self.spans):
+            dim_line(cum[i], cum[i + 1], y_tier2, f"Span {i+1} = {s.length_m:.2f} m", color='#1F4E78')
+
+        # ---- support reaction table (grid: header row of support letters, then Gk row, Qk row) ----
+        table_top = -1.55
+        row_h = 0.32
+        # find reasonable per-column width from spacing between supports (min for the outer margins)
+        col_half = min([cum[i+1] - cum[i] for i in range(n_spans)] + [Ltot]) / 2 if n_spans else 0.6
+        col_half = max(col_half, 0.35)
+
+        def table_cell(x, y, text, header=False):
+            w = col_half * 1.7
+            rect = patches.Rectangle((x - w / 2, y - row_h), w, row_h,
+                                      facecolor=('#1F4E78' if header else 'white'),
+                                      edgecolor='#888888', lw=0.6, zorder=8)
+            ax.add_patch(rect)
+            ax.text(x, y - row_h / 2, text, ha='center', va='center', fontsize=8.3,
+                    color=('white' if header else 'black'),
+                    fontweight='bold' if header else 'normal', zorder=9)
+
+        row_label_w = col_half * 1.1
+        ax.add_patch(patches.Rectangle((-row_label_w - col_half * 0.85, table_top - row_h), row_label_w, row_h,
+                                        facecolor='#1F4E78', edgecolor='#888888', lw=0.6, zorder=8))
+        ax.text(-row_label_w / 2 - col_half * 0.85, table_top - row_h / 2, "Support",
+                ha='center', va='center', fontsize=8.3, color='white', fontweight='bold', zorder=9)
         for i, lbl in enumerate(labels):
-            d, l = totals[lbl]['dead'], totals[lbl]['live']
-            cond = self.support_condition_label(i)
-            ax.text(cum[i], -1.55, f"Gk={d:.2f} kN\nQk={l:.2f} kN\n({cond})",
-                    ha='center', va='top', fontsize=8.5, fontweight='bold')
+            table_cell(cum[i], table_top, f"R{lbl}", header=True)
 
-        ax.set_title("Beam — Load & Reaction Diagram", fontsize=14, fontweight='bold')
+        ax.add_patch(patches.Rectangle((-row_label_w - col_half * 0.85, table_top - 2 * row_h), row_label_w, row_h,
+                                        facecolor='white', edgecolor='#888888', lw=0.6, zorder=8))
+        ax.text(-row_label_w / 2 - col_half * 0.85, table_top - 1.5 * row_h, "nGk (kN)",
+                ha='center', va='center', fontsize=8, zorder=9)
+        for i, lbl in enumerate(labels):
+            table_cell(cum[i], table_top - row_h, f"{totals[lbl]['dead']:.2f}")
 
-    def plot(self, filename: str = "beam_diagram.png") -> str:
-        cum_len = sum(s.length_m for s in self.spans) or 1
-        fig, ax = plt.subplots(figsize=(max(6, cum_len * 2.4), 7.5))
-        self._draw(ax)
-        plt.tight_layout()
-        plt.savefig(filename, dpi=200, facecolor='white')
+        ax.add_patch(patches.Rectangle((-row_label_w - col_half * 0.85, table_top - 3 * row_h), row_label_w, row_h,
+                                        facecolor='white', edgecolor='#888888', lw=0.6, zorder=8))
+        ax.text(-row_label_w / 2 - col_half * 0.85, table_top - 2.5 * row_h, "nQk (kN)",
+                ha='center', va='center', fontsize=8, zorder=9)
+        for i, lbl in enumerate(labels):
+            table_cell(cum[i], table_top - 2 * row_h, f"{totals[lbl]['live']:.2f}")
+
+        ax.set_title("Beam — Load & Reaction Diagram", fontsize=14, fontweight='bold', pad=14)
+        fig.tight_layout()
+        return fig, ax
+
+    def plot(self, filename: str = "beam_diagram.svg") -> str:
+        """Saves the diagram to a file. Use an .svg (default) or .pdf extension
+        for true vector output, or .png if you specifically need a raster image."""
+        fig, ax = self.figure()
+        fig.savefig(filename, facecolor='white')
         plt.close(fig)
         return filename
 
@@ -615,8 +689,7 @@ class BeamSystem:
               ref="Note: shared/interior\nsupports combine\nreactions from both\nadjacent spans.")
 
         # ---- Diagram page ----
-        fig2, ax2 = plt.subplots(figsize=(11.69, 8.27))
-        self._draw(ax2)
+        fig2, ax2 = self.figure()
         pages.append(fig2)
 
         with PdfPages(filename) as pdf:
