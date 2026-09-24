@@ -10,13 +10,37 @@ Put this file in the SAME folder as beam_multi_span.py.
 """
 
 import streamlit as st
+import matplotlib.pyplot as plt
+import matplotlib.patches as patches
 from beam_multi_span import (
     ProjectInfo, DesignCriteria, SlabPanel, WallLoad, PanelContribution, PointLoad,
-    Span, BeamSystem, FINISHES_OPTIONS, LIVE_LOAD_OPTIONS,
+    Span, BeamSystem, FINISHES_OPTIONS, LIVE_LOAD_OPTIONS, bs8110_classify_panel,
 )
 
 st.set_page_config(page_title="Multi-Span Beam Load Analysis", layout="centered")
 st.title("Multi-span beam — load analysis")
+
+
+def draw_panel_sketch(ly, lx, edges):
+    """A small live sketch of the panel: thick navy edges = continuous,
+    thin dashed grey edges = discontinuous — the 'shade the sides' input."""
+    fig, ax = plt.subplots(figsize=(3.4, 3.4))
+    ax.set_xlim(-0.35, 1.35)
+    ax.set_ylim(-0.35, 1.35)
+    ax.set_aspect('equal')
+    ax.axis('off')
+
+    def style(cont):
+        return dict(color='#1F4E78', lw=4.5, solid_capstyle='butt') if cont else \
+               dict(color='#AAAAAA', lw=1.3, linestyle=(0, (4, 3)))
+
+    ax.plot([0, 1], [1, 1], **style(edges['top']))
+    ax.plot([0, 1], [0, 0], **style(edges['bottom']))
+    ax.plot([0, 0], [0, 1], **style(edges['left']))
+    ax.plot([1, 1], [0, 1], **style(edges['right']))
+    ax.text(0.5, 1.12, f"ly = {ly:g} m", ha='center', va='bottom', fontsize=9)
+    ax.text(1.12, 0.5, f"lx = {lx:g} m", ha='left', va='center', fontsize=9, rotation=90)
+    return fig
 
 dc = DesignCriteria()
 
@@ -81,8 +105,30 @@ for i in range(1, int(n_panels) + 1):
             plen = c6.number_input("Partition length (m)", value=5.0, key=f"pplen{i}")
             pthk = c7.number_input("Partition thickness (m)", value=0.2, key=f"ppthk{i}")
             pht = c8.number_input("Partition height (m)", value=2.7, key=f"ppht{i}")
+
+        st.markdown("**Distribution factor** (auto — BS 8110-1:1997 Table 3.15)")
+        slab_type_label = st.selectbox(
+            "Panel type",
+            ["Solid slab, two-way spanning", "Ribbed slab (fixed factor = 0.5)", "Cantilever slab (fixed factor = 1.0)"],
+            key=f"pstype{i}")
+        slab_type = {"Solid slab, two-way spanning": "solid",
+                     "Ribbed slab (fixed factor = 0.5)": "ribbed",
+                     "Cantilever slab (fixed factor = 1.0)": "cantilever"}[slab_type_label]
+
+        edge_continuous = {"top": True, "bottom": True, "left": True, "right": True}
+        if slab_type == "solid":
+            ec1, ec2 = st.columns([1, 1])
+            with ec1:
+                edge_continuous["top"] = st.checkbox("Top continuous (long edge, ly)", value=True, key=f"etop{i}")
+                edge_continuous["bottom"] = st.checkbox("Bottom continuous (long edge, ly)", value=True, key=f"ebot{i}")
+                edge_continuous["left"] = st.checkbox("Left continuous (short edge, lx)", value=True, key=f"elft{i}")
+                edge_continuous["right"] = st.checkbox("Right continuous (short edge, lx)", value=True, key=f"ergt{i}")
+            with ec2:
+                st.pyplot(draw_panel_sketch(ly, lx, edge_continuous), width='content')
+            st.caption(f"BS 8110 panel type: **{bs8110_classify_panel(edge_continuous)}**")
+
         panels[name] = SlabPanel(name, t, ly, lx, FINISHES_OPTIONS[fin_key][1], LIVE_LOAD_OPTIONS[live_key][1],
-                               has_partition, plen, pthk, pht)
+                               has_partition, plen, pthk, pht, slab_type, edge_continuous)
         st.caption(f"-> Gk = {panels[name].dead_kNm2(dc):.3f} kN/m²   Qk = {panels[name].live_kNm2_factored(dc):.3f} kN/m²"
                    f"  (Step 5: calculated automatically)")
 
@@ -111,9 +157,17 @@ for i in range(int(n_spans)):
         for j in range(int(n_c)):
             c1, c2, c3 = st.columns(3)
             pid = c1.selectbox("Panel", options=list(panels.keys()), key=f"s{i}c{j}p")
-            pos = c2.selectbox("Position", options=["Left/Top", "Right/Bottom"], key=f"s{i}c{j}pos")
-            factor = c3.number_input("Distribution factor", value=0.5, step=0.1, key=f"s{i}c{j}f")
-            contributions.append(PanelContribution(pid, pos, factor))
+            pos = c2.selectbox("Position (side of beam)", options=["Left/Top", "Right/Bottom"], key=f"s{i}c{j}pos")
+            panel = panels[pid]
+            if panel.slab_type == "solid":
+                edge = c3.selectbox("Panel edge on this beam", options=["left", "right", "top", "bottom"],
+                                     key=f"s{i}c{j}edge")
+            else:
+                c3.markdown(f"*({panel.slab_type} slab — factor fixed)*")
+                edge = "left"  # unused for ribbed/cantilever, but a value is required
+            contributions.append(PanelContribution(pid, pos, edge))
+            factor = panel.distribution_factor(edge)
+            st.caption(f"-> distribution factor = {factor:.3f}")
 
         wall_here = False
         if wall_defined:
@@ -169,8 +223,8 @@ st.table(rows)
 
 # ---------------- Step 11: diagram ----------------
 st.header("11. Diagram")
-path = beam.plot("diagram.png")
-st.image(path)
+fig, _ = beam.figure()
+st.pyplot(fig, width='stretch')
 
 with st.expander("Full text summary"):
     st.code(beam.tabulate())

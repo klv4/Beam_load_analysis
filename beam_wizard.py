@@ -23,7 +23,7 @@ Run:
 
 from beam_multi_span import (
     ProjectInfo, DesignCriteria, SlabPanel, WallLoad, PanelContribution, PointLoad,
-    Span, BeamSystem, FINISHES_OPTIONS, LIVE_LOAD_OPTIONS,
+    Span, BeamSystem, FINISHES_OPTIONS, LIVE_LOAD_OPTIONS, bs8110_classify_panel,
 )
 
 
@@ -146,8 +146,36 @@ def run_wizard():
             pthk = ask_float("      Partition thickness (m)", default=0.2)
             pht = ask_float("      Partition height (m)", default=2.7)
 
+        print("    Panel type:")
+        print("      1. Solid slab, two-way spanning (uses BS 8110-1:1997 Table 3.15)")
+        print("      2. Ribbed slab (fixed distribution factor = 0.5)")
+        print("      3. Cantilever slab (fixed distribution factor = 1.0)")
+        slab_type_choice = ask_str("    Choose", default="1")
+        slab_type = {"1": "solid", "2": "ribbed", "3": "cantilever"}.get(slab_type_choice, "solid")
+
+        edge_continuous = {"top": True, "bottom": True, "left": True, "right": True}
+        if slab_type == "solid":
+            print(f"\n    Mark each edge of panel '{name}' as CONTINUOUS (built in / carries over an "
+                  f"adjacent support) or DISCONTINUOUS (simply supported / a free edge).")
+            print(f"      ly = {ly} m  -> TOP and BOTTOM are the 'long' edges")
+            print(f"      lx = {lx} m  -> LEFT and RIGHT are the 'short' edges")
+            for edge_key, edge_label in [("top", "TOP    (long edge, length = ly)"),
+                                          ("bottom", "BOTTOM (long edge, length = ly)"),
+                                          ("left", "LEFT   (short edge, length = lx)"),
+                                          ("right", "RIGHT  (short edge, length = lx)")]:
+                edge_continuous[edge_key] = ask_yesno(f"      {edge_label} continuous?", "y")
+
+            def mark(v):
+                return "====" if v else "----"
+            print(f"\n      {mark(edge_continuous['top'])}====")
+            print(f"      {'|' if edge_continuous['left'] else '.'}        "
+                  f"{'|' if edge_continuous['right'] else '.'}")
+            print(f"      {mark(edge_continuous['bottom'])}====")
+            panel_type_name = bs8110_classify_panel(edge_continuous)
+            print(f"      -> BS 8110 panel type: {panel_type_name}\n")
+
         panels[name] = SlabPanel(name, thickness, ly, lx, finishes, live,
-                                  has_partition, plen, pthk, pht)
+                                  has_partition, plen, pthk, pht, slab_type, edge_continuous)
 
     # ---------------- STEP 5: slab loading (auto) ----------------
     print("\nSTEP 5 — Slab loading calculation")
@@ -187,8 +215,21 @@ def run_wizard():
                 print(f"    '{pid}' isn't a defined panel — choose from: {', '.join(panels.keys())}")
             pos = ask_str(f"    Contribution {j+1}: position (e.g. Left/Top or Right/Bottom)",
                           default="Left/Top")
-            factor = ask_float(f"    Contribution {j+1}: distribution factor", default=0.5)
-            contributions.append(PanelContribution(pid, pos, factor))
+            panel = panels[pid]
+            if panel.slab_type == "solid":
+                while True:
+                    edge = ask_str(f"    Contribution {j+1}: which EDGE of panel '{pid}' bears onto "
+                                    f"this beam? (top/bottom/left/right)", default="left")
+                    edge = edge.strip().lower()
+                    if edge in ("top", "bottom", "left", "right"):
+                        break
+                    print("    Please enter one of: top, bottom, left, right")
+            else:
+                edge = "left"  # not used for ribbed/cantilever (fixed factor), but a value is required
+            contributions.append(PanelContribution(pid, pos, edge))
+            factor = panel.distribution_factor(edge)
+            print(f"    -> distribution factor = {factor:.3f}"
+                  + ("" if panel.slab_type == "solid" else f"  ({panel.slab_type} slab, fixed)"))
 
         wall_here = ask_yesno("  Is the wall present on THIS span?", "n") if wall_defined else False
 
@@ -228,8 +269,8 @@ def run_wizard():
     print(beam.tabulate())
 
     # ---------------- STEP 11: diagram ----------------
-    diagram_path = beam.plot("beam_diagram.png")
-    print(f"\nSTEP 11 — Diagram saved to: {diagram_path}")
+    diagram_path = beam.plot("beam_diagram.svg")
+    print(f"\nSTEP 11 — Diagram saved to: {diagram_path} (vector SVG — open in a browser or vector editor)")
 
     # ---------------- STEP 12: PDF report ----------------
     make_pdf = ask_yesno("\nSTEP 12 — Generate a PDF report?", "y")

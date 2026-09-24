@@ -83,6 +83,132 @@ class DesignCriteria:
 
 
 # ============================================================
+# BS 8110-1:1997 Table 3.15 — Shear force coefficients for uniformly loaded
+# rectangular panels supported on four sides with provision for torsion at
+# corners. Used to AUTOMATICALLY derive each panel-to-beam distribution
+# factor from the panel's aspect ratio (ly/lx) and edge continuity, instead
+# of it being typed in by hand.
+#
+# Per the code's own note: vs = vsx (uses beta_vx, interpolated across
+# ly/lx) when l = ly  -> i.e. for the LONG edges (top/bottom, length ly);
+#           vs = vsy (uses beta_vy, ~constant)   when l = lx  -> i.e. for the
+# SHORT edges (left/right, length lx). This matches Figure 3.8's convention:
+# left/right edges have length lx ("short edges"), top/bottom have length ly
+# ("long edges").
+# ============================================================
+BS8110_RATIOS = [1.0, 1.1, 1.2, 1.3, 1.4, 1.5, 1.75, 2.0]
+
+BS8110_TABLE_3_15 = {
+    "Four edges continuous": {
+        "continuous": {"vx": [0.33, 0.36, 0.39, 0.41, 0.43, 0.45, 0.48, 0.50], "vy": 0.33},
+    },
+    "One short edge discontinuous": {
+        "continuous": {"vx": [0.36, 0.39, 0.42, 0.44, 0.45, 0.47, 0.50, 0.52], "vy": 0.36},
+        "discontinuous": {"vx": None, "vy": 0.24},
+    },
+    "One long edge discontinuous": {
+        "continuous": {"vx": [0.36, 0.40, 0.44, 0.47, 0.49, 0.51, 0.55, 0.59], "vy": 0.36},
+        "discontinuous": {"vx": [0.24, 0.27, 0.29, 0.31, 0.32, 0.34, 0.36, 0.38], "vy": None},
+    },
+    "Two adjacent edges discontinuous": {
+        "continuous": {"vx": [0.40, 0.44, 0.47, 0.50, 0.52, 0.54, 0.57, 0.60], "vy": 0.40},
+        "discontinuous": {"vx": [0.26, 0.29, 0.31, 0.33, 0.34, 0.35, 0.38, 0.40], "vy": 0.26},
+    },
+    "Two short edges discontinuous": {
+        "continuous": {"vx": [0.40, 0.43, 0.45, 0.47, 0.48, 0.49, 0.52, 0.54], "vy": None},
+        "discontinuous": {"vx": None, "vy": 0.26},
+    },
+    "Two long edges discontinuous": {
+        "continuous": {"vx": None, "vy": 0.40},
+        "discontinuous": {"vx": [0.26, 0.30, 0.33, 0.36, 0.38, 0.40, 0.44, 0.47], "vy": None},
+    },
+    "Three edges discontinuous (one long edge continuous)": {
+        "continuous": {"vx": [0.45, 0.48, 0.51, 0.53, 0.55, 0.57, 0.60, 0.63], "vy": None},
+        "discontinuous": {"vx": [0.30, 0.32, 0.34, 0.35, 0.36, 0.37, 0.39, 0.41], "vy": 0.29},
+    },
+    "Three edges discontinuous (one short edge continuous)": {
+        "continuous": {"vx": None, "vy": 0.45},
+        "discontinuous": {"vx": [0.29, 0.33, 0.36, 0.38, 0.40, 0.42, 0.45, 0.48], "vy": 0.30},
+    },
+    "Four edges discontinuous": {
+        "discontinuous": {"vx": [0.33, 0.36, 0.39, 0.41, 0.43, 0.45, 0.48, 0.50], "vy": 0.33},
+    },
+}
+
+EDGE_NAMES = ("top", "bottom", "left", "right")
+SHORT_EDGES = ("left", "right")   # length lx
+LONG_EDGES = ("top", "bottom")    # length ly
+
+
+def bs8110_classify_panel(edge_continuous: Dict[str, bool]) -> str:
+    """Maps the 4 individual edge continuity states to one of Table 3.15/3.14's
+    9 named panel types (BS 8110-1:1997 3.5.3.7 / Table 3.14 classification)."""
+    n_disc_short = sum(1 for e in SHORT_EDGES if not edge_continuous[e])
+    n_disc_long = sum(1 for e in LONG_EDGES if not edge_continuous[e])
+    total = n_disc_short + n_disc_long
+
+    if total == 0:
+        return "Four edges continuous"
+    if total == 4:
+        return "Four edges discontinuous"
+    if total == 1:
+        return "One short edge discontinuous" if n_disc_short == 1 else "One long edge discontinuous"
+    if total == 2:
+        if n_disc_short == 2:
+            return "Two short edges discontinuous"
+        if n_disc_long == 2:
+            return "Two long edges discontinuous"
+        return "Two adjacent edges discontinuous"
+    if total == 3:
+        return ("Three edges discontinuous (one short edge continuous)" if n_disc_short == 1
+                else "Three edges discontinuous (one long edge continuous)")
+    raise ValueError("Invalid edge continuity state")
+
+
+def bs8110_interp(values: List[float], ratio: float) -> float:
+    """Linear interpolation of a Table 3.15 vx row across the standard ly/lx columns."""
+    ratio = max(BS8110_RATIOS[0], min(ratio, BS8110_RATIOS[-1]))
+    for i in range(len(BS8110_RATIOS) - 1):
+        r0, r1 = BS8110_RATIOS[i], BS8110_RATIOS[i + 1]
+        if r0 <= ratio <= r1:
+            v0, v1 = values[i], values[i + 1]
+            frac = (ratio - r0) / (r1 - r0) if r1 != r0 else 0.0
+            return v0 + frac * (v1 - v0)
+    return values[-1]
+
+
+def bs8110_beta_for_edge(edge_continuous: Dict[str, bool], ly_m: float, lx_m: float, edge: str) -> float:
+    """The Table 3.15 shear coefficient (beta_vx for long edges, beta_vy for
+    short edges) for one specific edge of a two-way solid slab panel."""
+    lo, hi = min(ly_m, lx_m), max(ly_m, lx_m)
+    ratio = hi / lo if lo > 0 else 1.0
+    panel_type = bs8110_classify_panel(edge_continuous)
+    row = BS8110_TABLE_3_15[panel_type]["continuous" if edge_continuous[edge] else "discontinuous"]
+    if edge in SHORT_EDGES:
+        if row["vy"] is None:
+            raise ValueError(f"Table 3.15 has no vy value for '{panel_type}' — check edge continuity inputs.")
+        return row["vy"]
+    else:
+        if row["vx"] is None:
+            raise ValueError(f"Table 3.15 has no vx value for '{panel_type}' — check edge continuity inputs.")
+        return bs8110_interp(row["vx"], ratio)
+
+
+def slab_panel_distribution_factor(panel: "SlabPanel", edge: str) -> float:
+    """The value that replaces the old hand-typed 'distribution factor':
+    - Ribbed slab   -> fixed 0.5
+    - Cantilever    -> fixed 1.0
+    - Solid 2-way   -> BS 8110-1:1997 Table 3.15 beta_vx / beta_vy, based on
+                       this panel's aspect ratio and the continuity of the
+                       specific edge bearing onto the beam."""
+    if panel.slab_type == "ribbed":
+        return 0.5
+    if panel.slab_type == "cantilever":
+        return 1.0
+    return bs8110_beta_for_edge(panel.edge_continuous, panel.ly_m, panel.lx_m, edge)
+
+
+# ============================================================
 # STEP 3/4 — slab panels
 # ============================================================
 @dataclass
@@ -97,6 +223,16 @@ class SlabPanel:
     partition_len_m: float = 0.0
     partition_thk_m: float = 0.0
     partition_ht_m: float = 0.0
+    slab_type: str = "solid"          # "solid" | "ribbed" | "cantilever"
+    edge_continuous: Dict[str, bool] = field(
+        default_factory=lambda: {"top": True, "bottom": True, "left": True, "right": True})
+
+    def panel_type_bs8110(self) -> str:
+        """The Table 3.14/3.15 panel classification derived from this panel's edges."""
+        return bs8110_classify_panel(self.edge_continuous)
+
+    def distribution_factor(self, edge: str) -> float:
+        return slab_panel_distribution_factor(self, edge)
 
     def self_weight_kNm2(self, dc: DesignCriteria) -> float:
         return self.thickness_mm * dc.concrete_density / 1000.0
@@ -133,8 +269,9 @@ class WallLoad:
 @dataclass
 class PanelContribution:
     panel_id: str              # matches a SlabPanel.panel_id
-    position: str              # e.g. "Left/Top" or "Right/Bottom"
-    distribution_factor: float
+    position: str              # e.g. "Left/Top" or "Right/Bottom" — which side of the BEAM
+    edge: str                  # "top" | "bottom" | "left" | "right" — which edge of the PANEL
+                                # bears onto this beam; drives the auto-computed distribution factor
 
 
 # ============================================================
@@ -173,8 +310,9 @@ class Span:
         candidates: Dict[str, List[Tuple[int, float, float]]] = {}
         for c in self.contributions:
             p = panels[c.panel_id]
-            dead = c.distribution_factor * p.lx_m * p.dead_kNm2(dc)
-            live = c.distribution_factor * p.lx_m * p.live_kNm2_factored(dc)
+            factor = p.distribution_factor(c.edge)   # BS 8110 Table 3.15 (or 0.5/1.0 for ribbed/cantilever)
+            dead = factor * p.lx_m * p.dead_kNm2(dc)
+            live = factor * p.lx_m * p.live_kNm2_factored(dc)
             rows.append((c.panel_id, c.position, dead, live))
             candidates.setdefault(c.position, []).append((c.panel_id, dead, live))
 
@@ -587,6 +725,26 @@ class BeamSystem:
         table(headers, rows, [0.10, 0.16, 0.14, 0.16, 0.14, 0.15, 0.15],
               ref="BS 6399-1:1996\nTable 1")
 
+        # ---- PANEL EDGE CONDITIONS (drives the BS 8110 Table 3.15 factors) ----
+        section_title("PANEL EDGE CONDITIONS & CLASSIFICATION")
+        headers = ["Panel", "Slab Type", "ly/lx", "Top", "Bottom", "Left", "Right", "BS 8110 Panel Type"]
+        rows = []
+        for i, pnl in self.panels.items():
+            lo, hi = min(pnl.ly_m, pnl.lx_m), max(pnl.ly_m, pnl.lx_m)
+            ratio = f"{hi/lo:.2f}" if lo > 0 else "-"
+            if pnl.slab_type == "solid":
+                edge_txt = {k: ("Cont." if v else "Disc.") for k, v in pnl.edge_continuous.items()}
+                ptype = pnl.panel_type_bs8110()
+            else:
+                edge_txt = {k: "-" for k in EDGE_NAMES}
+                ptype = f"N/A ({pnl.slab_type} — fixed factor)"
+            rows.append([str(i), pnl.slab_type.capitalize(), ratio,
+                        edge_txt["top"], edge_txt["bottom"], edge_txt["left"], edge_txt["right"], ptype])
+        table(headers, rows, [0.09, 0.11, 0.08, 0.09, 0.10, 0.09, 0.09, 0.35], fontsize=6.9,
+              ref="BS 8110-1:1997\nTable 3.14/3.15")
+        text_line("Top/Bottom = long edges (length ly).  Left/Right = short edges (length lx).",
+                  fontsize=6.8)
+
         # ---- WALL LOADING ----
         section_title("WALL LOADING")
         headers = ["Present\nanywhere", "Thickness (m)", "Height (m)", "Load (kN/m)", "Factored nGk (kN/m)"]
@@ -627,17 +785,21 @@ class BeamSystem:
 
             # -- Load distribution to beam --
             section_title(f"LOAD DISTRIBUTION TO BEAM — SPAN {i+1} ({labels[i]} -> {labels[i+1]})")
-            headers = ["Panel", "Position", "Dist.\nFactor", "Lx (m)", "Dead nGk\n(kN/m)", "Live nQk\n(kN/m)"]
+            headers = ["Panel", "Position", "Edge", "Factor", "Lx (m)", "Dead nGk\n(kN/m)", "Live nQk\n(kN/m)"]
             rows = []
-            for pid, pos, dead, live in s.distribution_rows:
-                crit = s.governing.get(pos, {})
-                tag = " *" if crit.get('panel_id') == pid else ""
-                rows.append([f"{pid}{tag}", pos, f"{[c.distribution_factor for c in s.contributions if c.panel_id==pid and c.position==pos][0]:.2f}",
-                            f"{self.panels[pid].lx_m:.2f}", f"{dead:.4f}", f"{live:.4f}"])
+            for c in s.contributions:
+                p = self.panels[c.panel_id]
+                dead = [d for pid, pos, d, l in s.distribution_rows if pid == c.panel_id and pos == c.position][0]
+                live = [l for pid, pos, d, l in s.distribution_rows if pid == c.panel_id and pos == c.position][0]
+                crit = s.governing.get(c.position, {})
+                tag = " *" if crit.get('panel_id') == c.panel_id else ""
+                factor = p.distribution_factor(c.edge)
+                rows.append([f"{c.panel_id}{tag}", c.position, c.edge, f"{factor:.3f}",
+                            f"{p.lx_m:.2f}", f"{dead:.4f}", f"{live:.4f}"])
             if not rows:
-                rows = [["-", "-", "-", "-", "0", "0"]]
-            table(headers, rows, [0.13, 0.22, 0.14, 0.13, 0.19, 0.19],
-                  ref="* = critical/governing\npanel on that side")
+                rows = [["-", "-", "-", "-", "-", "0", "0"]]
+            table(headers, rows, [0.13, 0.19, 0.11, 0.13, 0.12, 0.16, 0.16],
+                  ref="* = critical/governing panel.\nFactor = BS 8110-1:1997\nTable 3.15 beta (or fixed\n0.5 ribbed / 1.0 cantilever).")
             crit_panels = sorted({g['panel_id'] for g in s.governing.values()})
             text_line(f"Take: " + ", ".join(f"Panel {pid}" for pid in crit_panels) if crit_panels
                       else "Take: (no panels assigned)", fontsize=7.8)
