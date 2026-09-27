@@ -23,7 +23,7 @@ Run:
 
 from beam_multi_span import (
     ProjectInfo, DesignCriteria, SlabPanel, WallLoad, PanelContribution, PointLoad,
-    Span, BeamSystem, FINISHES_OPTIONS, LIVE_LOAD_OPTIONS, bs8110_classify_panel,
+    Span, BeamSystem, FINISHES_OPTIONS, LIVE_LOAD_OPTIONS,
 )
 
 
@@ -134,7 +134,14 @@ def run_wizard():
             print(f"  '{name}' is already used for another panel — choose a different name.")
         thickness = ask_float("    Thickness (mm)", default=150)
         ly = ask_float("    ly — long dimension (m)", default=5)
-        lx = ask_float("    lx — load width feeding the beam (m)", default=2)
+        lx = ask_float("    lx — short dimension / load width feeding the beam (m)", default=2)
+        if lx > ly:
+            ly, lx = lx, ly
+            print(f"    (ly must be the longer dimension — swapped: ly={ly} m, lx={lx} m)")
+        ratio = ly / lx if lx > 0 else float("inf")
+        spanning = "Two-way" if ratio <= 2.0 else "One-way"
+        print(f"    ly/lx = {ratio:.2f}  ->  {'<= 2.0' if spanning=='Two-way' else '> 2.0'}"
+              f"  ->  {spanning} spanning slab")
 
         # ---------------- STEP 4: design criteria & load selection ----------------
         finishes = ask_choice("    Finishes:", FINISHES_OPTIONS, default_key="2")
@@ -147,35 +154,62 @@ def run_wizard():
             pht = ask_float("      Partition height (m)", default=2.7)
 
         print("    Panel type:")
-        print("      1. Solid slab, two-way spanning (uses BS 8110-1:1997 Table 3.15)")
+        print("      1. Solid slab (uses BS 8110-1:1997 Table 3.15 — two-way as normal,")
+        print("         one-way takes beta_vx at ly/lx = 2.0)")
         print("      2. Ribbed slab (fixed distribution factor = 0.5)")
         print("      3. Cantilever slab (fixed distribution factor = 1.0)")
         slab_type_choice = ask_str("    Choose", default="1")
         slab_type = {"1": "solid", "2": "ribbed", "3": "cantilever"}.get(slab_type_choice, "solid")
 
         edge_continuous = {"top": True, "bottom": True, "left": True, "right": True}
+        primary_edge, primary_edge_is_ly = "left", False
         if slab_type == "solid":
+            # Orientation FIRST: ly isn't always the horizontal pair — ask which physical
+            # edge carries which dimension before drawing anything, so the sketch below
+            # is labelled correctly.
+            print(f"\n    Panel edge on this beam — orientation")
+            print(f"      Pick one edge of panel '{name}' as a reference, and tell me whether")
+            print(f"      THAT edge (and its opposite) is the ly side or the lx side.")
+            while True:
+                primary_edge = ask_str("      Reference edge (top/bottom/left/right)", default="left").strip().lower()
+                if primary_edge in ("top", "bottom", "left", "right"):
+                    break
+                print("      Please enter one of: top, bottom, left, right")
+            primary_edge_is_ly = ask_yesno(f"      Is the '{primary_edge}' edge the ly (long, {ly} m) side?"
+                                            f" ('n' means it's the lx ({lx} m) side)", "n")
+
+            opposite = {"top": "bottom", "bottom": "top", "left": "right", "right": "left"}[primary_edge]
+            ly_pair = {primary_edge, opposite} if primary_edge_is_ly else \
+                      ({"top", "bottom", "left", "right"} - {primary_edge, opposite})
+
             print(f"\n    Mark each edge of panel '{name}' as CONTINUOUS (built in / carries over an "
                   f"adjacent support) or DISCONTINUOUS (simply supported / a free edge).")
-            print(f"      ly = {ly} m  -> TOP and BOTTOM are the 'long' edges")
-            print(f"      lx = {lx} m  -> LEFT and RIGHT are the 'short' edges")
-            for edge_key, edge_label in [("top", "TOP    (long edge, length = ly)"),
-                                          ("bottom", "BOTTOM (long edge, length = ly)"),
-                                          ("left", "LEFT   (short edge, length = lx)"),
-                                          ("right", "RIGHT  (short edge, length = lx)")]:
-                edge_continuous[edge_key] = ask_yesno(f"      {edge_label} continuous?", "y")
+            print(f"      ly = {ly} m  -> {' and '.join(sorted(ly_pair))} edge(s)")
+            print(f"      lx = {lx} m  -> {' and '.join(sorted({'top','bottom','left','right'} - ly_pair))} edge(s)")
+            for edge_key in ("top", "bottom", "left", "right"):
+                dim_label = "ly" if edge_key in ly_pair else "lx"
+                dim_value = ly if dim_label == "ly" else lx
+                edge_continuous[edge_key] = ask_yesno(
+                    f"      {edge_key.upper():<6} ({dim_label} edge, length = {dim_value} m) continuous?", "y")
 
+            # oriented sketch: draw ly on whichever pair the user actually specified
             def mark(v):
                 return "====" if v else "----"
-            print(f"\n      {mark(edge_continuous['top'])}====")
-            print(f"      {'|' if edge_continuous['left'] else '.'}        "
+            top_lbl = "ly" if "top" in ly_pair else "lx"
+            left_is_ly = "left" in ly_pair
+            print(f"\n      [{top_lbl}] {mark(edge_continuous['top'])}====")
+            print(f"      {'|' if edge_continuous['left'] else '.'}"
+                  f"{'(ly)' if left_is_ly else '(lx)':<8}"
                   f"{'|' if edge_continuous['right'] else '.'}")
             print(f"      {mark(edge_continuous['bottom'])}====")
-            panel_type_name = bs8110_classify_panel(edge_continuous)
-            print(f"      -> BS 8110 panel type: {panel_type_name}\n")
+
+            panels_tmp = SlabPanel(name, thickness, ly, lx, finishes, live, has_partition, plen, pthk, pht,
+                                    slab_type, edge_continuous, primary_edge, primary_edge_is_ly)
+            print(f"      -> BS 8110 panel type: {panels_tmp.panel_type_bs8110()}\n")
 
         panels[name] = SlabPanel(name, thickness, ly, lx, finishes, live,
-                                  has_partition, plen, pthk, pht, slab_type, edge_continuous)
+                                  has_partition, plen, pthk, pht, slab_type, edge_continuous,
+                                  primary_edge, primary_edge_is_ly)
 
     # ---------------- STEP 5: slab loading (auto) ----------------
     print("\nSTEP 5 — Slab loading calculation")
@@ -213,20 +247,20 @@ def run_wizard():
                 if pid in panels:
                     break
                 print(f"    '{pid}' isn't a defined panel — choose from: {', '.join(panels.keys())}")
-            pos = ask_str(f"    Contribution {j+1}: position (e.g. Left/Top or Right/Bottom)",
-                          default="Left/Top")
             panel = panels[pid]
             if panel.slab_type == "solid":
                 while True:
                     edge = ask_str(f"    Contribution {j+1}: which EDGE of panel '{pid}' bears onto "
-                                    f"this beam? (top/bottom/left/right)", default="left")
+                                    f"this beam? (top/bottom/left/right) — this also groups it with any "
+                                    f"other contribution sharing the same edge as being on the same side "
+                                    f"of the beam", default=panel.primary_edge)
                     edge = edge.strip().lower()
                     if edge in ("top", "bottom", "left", "right"):
                         break
                     print("    Please enter one of: top, bottom, left, right")
             else:
                 edge = "left"  # not used for ribbed/cantilever (fixed factor), but a value is required
-            contributions.append(PanelContribution(pid, pos, edge))
+            contributions.append(PanelContribution(pid, edge))
             factor = panel.distribution_factor(edge)
             print(f"    -> distribution factor = {factor:.3f}"
                   + ("" if panel.slab_type == "solid" else f"  ({panel.slab_type} slab, fixed)"))

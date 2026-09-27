@@ -21,9 +21,12 @@ st.set_page_config(page_title="Multi-Span Beam Load Analysis", layout="centered"
 st.title("Multi-span beam — load analysis")
 
 
-def draw_panel_sketch(ly, lx, edges):
+def draw_panel_sketch(ly, lx, edges, ly_edges):
     """A small live sketch of the panel: thick navy edges = continuous,
-    thin dashed grey edges = discontinuous — the 'shade the sides' input."""
+    thin dashed grey edges = discontinuous — the 'shade the sides' input.
+    `ly_edges` (a set like {'top','bottom'} or {'left','right'}) says which
+    pair of edges is the ly (long) dimension, so the sketch orients itself
+    to whatever the user specified rather than assuming ly is horizontal."""
     fig, ax = plt.subplots(figsize=(3.4, 3.4))
     ax.set_xlim(-0.35, 1.35)
     ax.set_ylim(-0.35, 1.35)
@@ -38,8 +41,12 @@ def draw_panel_sketch(ly, lx, edges):
     ax.plot([0, 1], [0, 0], **style(edges['bottom']))
     ax.plot([0, 0], [0, 1], **style(edges['left']))
     ax.plot([1, 1], [0, 1], **style(edges['right']))
-    ax.text(0.5, 1.12, f"ly = {ly:g} m", ha='center', va='bottom', fontsize=9)
-    ax.text(1.12, 0.5, f"lx = {lx:g} m", ha='left', va='center', fontsize=9, rotation=90)
+
+    top_dim, side_dim = (ly, lx) if "top" in ly_edges else (lx, ly)
+    ax.text(0.5, 1.12, f"{'ly' if 'top' in ly_edges else 'lx'} = {top_dim:g} m",
+            ha='center', va='bottom', fontsize=9)
+    ax.text(1.12, 0.5, f"{'ly' if 'left' in ly_edges else 'lx'} = {side_dim:g} m",
+            ha='left', va='center', fontsize=9, rotation=90)
     return fig
 
 dc = DesignCriteria()
@@ -91,8 +98,15 @@ for i in range(1, int(n_panels) + 1):
     with st.expander(f"Panel: {name}", expanded=(i <= 2)):
         c1, c2, c3 = st.columns(3)
         t = c1.number_input("Thickness (mm)", value=200, key=f"pt{i}")
-        ly = c2.number_input("ly (m)", value=5.0, key=f"ply{i}")
-        lx = c3.number_input("lx (m)", value=2.0, key=f"plx{i}")
+        ly = c2.number_input("ly — long dimension (m)", value=5.0, key=f"ply{i}")
+        lx = c3.number_input("lx — short dimension (m)", value=2.0, key=f"plx{i}")
+        if lx > ly:
+            ly, lx = lx, ly
+            st.info(f"ly must be the longer dimension — swapped automatically: ly={ly:g} m, lx={lx:g} m")
+        ratio = ly / lx if lx > 0 else float("inf")
+        spanning = "Two-way" if ratio <= 2.0 else "One-way"
+        st.caption(f"ly/lx = {ratio:.2f}  ->  {'\u2264 2.0' if spanning=='Two-way' else '> 2.0'}  ->  "
+                   f"**{spanning} spanning slab**")
         c4, c5 = st.columns(2)
         fin_key = c4.selectbox("Finishes", options=list(FINISHES_OPTIONS.keys()),
                                 format_func=lambda k: fin_labels[k], key=f"pfin{i}")
@@ -109,26 +123,46 @@ for i in range(1, int(n_panels) + 1):
         st.markdown("**Distribution factor** (auto — BS 8110-1:1997 Table 3.15)")
         slab_type_label = st.selectbox(
             "Panel type",
-            ["Solid slab, two-way spanning", "Ribbed slab (fixed factor = 0.5)", "Cantilever slab (fixed factor = 1.0)"],
+            ["Solid slab (Table 3.15 — one-way uses beta_vx at ly/lx = 2.0)",
+             "Ribbed slab (fixed factor = 0.5)", "Cantilever slab (fixed factor = 1.0)"],
             key=f"pstype{i}")
-        slab_type = {"Solid slab, two-way spanning": "solid",
+        slab_type = {"Solid slab (Table 3.15 — one-way uses beta_vx at ly/lx = 2.0)": "solid",
                      "Ribbed slab (fixed factor = 0.5)": "ribbed",
                      "Cantilever slab (fixed factor = 1.0)": "cantilever"}[slab_type_label]
 
         edge_continuous = {"top": True, "bottom": True, "left": True, "right": True}
+        primary_edge, primary_edge_is_ly = "left", False
+        ly_edges = {"top", "bottom"}
         if slab_type == "solid":
+            st.markdown("**Panel edge on this beam — orientation**")
+            st.caption("ly isn't always horizontal — pick a reference edge and say whether it's your "
+                       "ly or lx side, so the sketch below orients correctly.")
+            oc1, oc2 = st.columns(2)
+            primary_edge = oc1.selectbox("Reference edge", ["top", "bottom", "left", "right"],
+                                          index=2, key=f"pref{i}")
+            primary_edge_is_ly = oc2.checkbox(f"'{primary_edge}' edge is the ly ({ly:g} m) side",
+                                               value=False, key=f"prefly{i}")
+            opposite = {"top": "bottom", "bottom": "top", "left": "right", "right": "left"}[primary_edge]
+            pair = {primary_edge, opposite}
+            ly_edges = pair if primary_edge_is_ly else ({"top", "bottom", "left", "right"} - pair)
+            lx_edges = {"top", "bottom", "left", "right"} - ly_edges
+
             ec1, ec2 = st.columns([1, 1])
             with ec1:
-                edge_continuous["top"] = st.checkbox("Top continuous (long edge, ly)", value=True, key=f"etop{i}")
-                edge_continuous["bottom"] = st.checkbox("Bottom continuous (long edge, ly)", value=True, key=f"ebot{i}")
-                edge_continuous["left"] = st.checkbox("Left continuous (short edge, lx)", value=True, key=f"elft{i}")
-                edge_continuous["right"] = st.checkbox("Right continuous (short edge, lx)", value=True, key=f"ergt{i}")
+                for edge_key in ("top", "bottom", "left", "right"):
+                    dim = "ly" if edge_key in ly_edges else "lx"
+                    dim_val = ly if dim == "ly" else lx
+                    edge_continuous[edge_key] = st.checkbox(
+                        f"{edge_key.capitalize()} continuous ({dim} edge, {dim_val:g} m)",
+                        value=True, key=f"e{edge_key}{i}")
             with ec2:
-                st.pyplot(draw_panel_sketch(ly, lx, edge_continuous), width='content')
-            st.caption(f"BS 8110 panel type: **{bs8110_classify_panel(edge_continuous)}**")
+                st.pyplot(draw_panel_sketch(ly, lx, edge_continuous, ly_edges), width='content')
+            st.caption(f"BS 8110 panel type: **{bs8110_classify_panel(edge_continuous, list(ly_edges), list(lx_edges))}**"
+                       + (f"  — *one-way: beta_vx taken at ly/lx = 2.0*" if spanning == "One-way" else ""))
 
         panels[name] = SlabPanel(name, t, ly, lx, FINISHES_OPTIONS[fin_key][1], LIVE_LOAD_OPTIONS[live_key][1],
-                               has_partition, plen, pthk, pht, slab_type, edge_continuous)
+                               has_partition, plen, pthk, pht, slab_type, edge_continuous,
+                               primary_edge, primary_edge_is_ly)
         st.caption(f"-> Gk = {panels[name].dead_kNm2(dc):.3f} kN/m²   Qk = {panels[name].live_kNm2_factored(dc):.3f} kN/m²"
                    f"  (Step 5: calculated automatically)")
 
@@ -155,17 +189,21 @@ for i in range(int(n_spans)):
         n_c = st.number_input("Number of panel contributions", min_value=0, value=2, step=1, key=f"nc{i}")
         contributions = []
         for j in range(int(n_c)):
-            c1, c2, c3 = st.columns(3)
+            c1, c2 = st.columns(2)
             pid = c1.selectbox("Panel", options=list(panels.keys()), key=f"s{i}c{j}p")
-            pos = c2.selectbox("Position (side of beam)", options=["Left/Top", "Right/Bottom"], key=f"s{i}c{j}pos")
             panel = panels[pid]
             if panel.slab_type == "solid":
-                edge = c3.selectbox("Panel edge on this beam", options=["left", "right", "top", "bottom"],
-                                     key=f"s{i}c{j}edge")
+                default_idx = ["left", "right", "top", "bottom"].index(panel.primary_edge) \
+                    if panel.primary_edge in ("left", "right", "top", "bottom") else 0
+                edge = c2.selectbox(
+                    "Panel edge on this beam",
+                    options=["left", "right", "top", "bottom"], index=default_idx, key=f"s{i}c{j}edge")
+                st.caption("Contributions sharing the same edge are treated as being on the same "
+                           "side of the beam (for critical-panel selection).")
             else:
-                c3.markdown(f"*({panel.slab_type} slab — factor fixed)*")
+                c2.markdown(f"*({panel.slab_type} slab — factor fixed, edge not needed)*")
                 edge = "left"  # unused for ribbed/cantilever, but a value is required
-            contributions.append(PanelContribution(pid, pos, edge))
+            contributions.append(PanelContribution(pid, edge))
             factor = panel.distribution_factor(edge)
             st.caption(f"-> distribution factor = {factor:.3f}")
 

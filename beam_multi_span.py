@@ -136,15 +136,23 @@ BS8110_TABLE_3_15 = {
 }
 
 EDGE_NAMES = ("top", "bottom", "left", "right")
-SHORT_EDGES = ("left", "right")   # length lx
-LONG_EDGES = ("top", "bottom")    # length ly
+OPPOSITE_EDGE = {"top": "bottom", "bottom": "top", "left": "right", "right": "left"}
+# Defaults, used only when a panel-specific orientation isn't supplied. Which
+# physical edges actually carry ly vs lx is now per-panel (see
+# SlabPanel.ly_edges/lx_edges) since a panel's long dimension can run
+# horizontally or vertically depending on how it was drawn.
+SHORT_EDGES = ("left", "right")   # length lx (default orientation)
+LONG_EDGES = ("top", "bottom")    # length ly (default orientation)
 
 
-def bs8110_classify_panel(edge_continuous: Dict[str, bool]) -> str:
+def bs8110_classify_panel(edge_continuous: Dict[str, bool], long_edges=LONG_EDGES,
+                           short_edges=SHORT_EDGES) -> str:
     """Maps the 4 individual edge continuity states to one of Table 3.15/3.14's
-    9 named panel types (BS 8110-1:1997 3.5.3.7 / Table 3.14 classification)."""
-    n_disc_short = sum(1 for e in SHORT_EDGES if not edge_continuous[e])
-    n_disc_long = sum(1 for e in LONG_EDGES if not edge_continuous[e])
+    9 named panel types (BS 8110-1:1997 3.5.3.7 / Table 3.14 classification).
+    `long_edges`/`short_edges` say which physical edges (top/bottom/left/right)
+    carry the ly / lx dimension for THIS panel — see SlabPanel.ly_edges()."""
+    n_disc_short = sum(1 for e in short_edges if not edge_continuous[e])
+    n_disc_long = sum(1 for e in long_edges if not edge_continuous[e])
     total = n_disc_short + n_disc_long
 
     if total == 0:
@@ -177,14 +185,21 @@ def bs8110_interp(values: List[float], ratio: float) -> float:
     return values[-1]
 
 
-def bs8110_beta_for_edge(edge_continuous: Dict[str, bool], ly_m: float, lx_m: float, edge: str) -> float:
-    """The Table 3.15 shear coefficient (beta_vx for long edges, beta_vy for
-    short edges) for one specific edge of a two-way solid slab panel."""
-    lo, hi = min(ly_m, lx_m), max(ly_m, lx_m)
-    ratio = hi / lo if lo > 0 else 1.0
-    panel_type = bs8110_classify_panel(edge_continuous)
+def bs8110_beta_for_edge(edge_continuous: Dict[str, bool], ly_m: float, lx_m: float, edge: str,
+                          long_edges=LONG_EDGES, short_edges=SHORT_EDGES) -> float:
+    """The Table 3.15 shear coefficient (beta_vx for long/ly edges, beta_vy for
+    short/lx edges) for one specific edge of a solid slab panel.
+
+    Two-way spanning (ly/lx <= 2.0): beta_vx is interpolated across the
+    standard ly/lx columns as normal.
+    One-way spanning (ly/lx > 2.0): `bs8110_interp` clamps its input ratio to
+    the table's highest column (2.0), which IS the rule "take beta_vx for
+    ly/lx = 2.0" — so no separate branch is needed here, it falls out of the
+    same clamped interpolation used for the two-way case."""
+    ratio = (ly_m / lx_m) if lx_m > 0 else 1.0   # ly_m is always >= lx_m (SlabPanel enforces this)
+    panel_type = bs8110_classify_panel(edge_continuous, long_edges, short_edges)
     row = BS8110_TABLE_3_15[panel_type]["continuous" if edge_continuous[edge] else "discontinuous"]
-    if edge in SHORT_EDGES:
+    if edge in short_edges:
         if row["vy"] is None:
             raise ValueError(f"Table 3.15 has no vy value for '{panel_type}' — check edge continuity inputs.")
         return row["vy"]
@@ -196,16 +211,20 @@ def bs8110_beta_for_edge(edge_continuous: Dict[str, bool], ly_m: float, lx_m: fl
 
 def slab_panel_distribution_factor(panel: "SlabPanel", edge: str) -> float:
     """The value that replaces the old hand-typed 'distribution factor':
-    - Ribbed slab   -> fixed 0.5
-    - Cantilever    -> fixed 1.0
-    - Solid 2-way   -> BS 8110-1:1997 Table 3.15 beta_vx / beta_vy, based on
-                       this panel's aspect ratio and the continuity of the
-                       specific edge bearing onto the beam."""
+    - Ribbed slab       -> fixed 0.5
+    - Cantilever        -> fixed 1.0
+    - Solid, two-way    -> BS 8110-1:1997 Table 3.15 beta_vx / beta_vy, based
+                           on this panel's aspect ratio and the continuity of
+                           the specific edge bearing onto the beam.
+    - Solid, one-way    -> same Table 3.15 lookup, but beta_vx is taken at
+                           ly/lx = 2.0 (handled automatically by the clamped
+                           interpolation in bs8110_beta_for_edge)."""
     if panel.slab_type == "ribbed":
         return 0.5
     if panel.slab_type == "cantilever":
         return 1.0
-    return bs8110_beta_for_edge(panel.edge_continuous, panel.ly_m, panel.lx_m, edge)
+    return bs8110_beta_for_edge(panel.edge_continuous, panel.ly_m, panel.lx_m, edge,
+                                 panel.ly_edges(), panel.lx_edges())
 
 
 # ============================================================
@@ -226,10 +245,40 @@ class SlabPanel:
     slab_type: str = "solid"          # "solid" | "ribbed" | "cantilever"
     edge_continuous: Dict[str, bool] = field(
         default_factory=lambda: {"top": True, "bottom": True, "left": True, "right": True})
+    # Orientation: which physical edge carries the ly (long) dimension isn't
+    # always top/bottom — a panel can be drawn either way. `primary_edge` is
+    # a single reference edge the user points to, and `primary_edge_is_ly`
+    # says whether THAT edge (and its opposite) is the ly side or the lx
+    # side. Everything else (sketch labelling, which edges use beta_vx vs
+    # beta_vy) is derived from this one pair of fields.
+    primary_edge: str = "left"
+    primary_edge_is_ly: bool = False
+
+    def __post_init__(self):
+        # ly is BY DEFINITION the longer dimension — auto-correct if entered
+        # the other way round rather than silently computing with them
+        # swapped relative to what Table 3.15 expects.
+        if self.lx_m > self.ly_m:
+            self.ly_m, self.lx_m = self.lx_m, self.ly_m
+
+    def ly_edges(self) -> set:
+        """Which of the 4 edges (top/bottom/left/right) carry the ly (long) dimension."""
+        pair = {self.primary_edge, OPPOSITE_EDGE[self.primary_edge]}
+        return pair if self.primary_edge_is_ly else ({"top", "bottom", "left", "right"} - pair)
+
+    def lx_edges(self) -> set:
+        return {"top", "bottom", "left", "right"} - self.ly_edges()
+
+    def spanning_ratio(self) -> float:
+        return self.ly_m / self.lx_m if self.lx_m > 0 else float("inf")
+
+    def spanning_type(self) -> str:
+        """BS 8110-1:1997 2.1.3.2 — effectively one-way once ly/lx exceeds 2.0."""
+        return "Two-way" if self.spanning_ratio() <= 2.0 else "One-way"
 
     def panel_type_bs8110(self) -> str:
         """The Table 3.14/3.15 panel classification derived from this panel's edges."""
-        return bs8110_classify_panel(self.edge_continuous)
+        return bs8110_classify_panel(self.edge_continuous, self.ly_edges(), self.lx_edges())
 
     def distribution_factor(self, edge: str) -> float:
         return slab_panel_distribution_factor(self, edge)
@@ -269,9 +318,11 @@ class WallLoad:
 @dataclass
 class PanelContribution:
     panel_id: str              # matches a SlabPanel.panel_id
-    position: str              # e.g. "Left/Top" or "Right/Bottom" — which side of the BEAM
     edge: str                  # "top" | "bottom" | "left" | "right" — which edge of the PANEL
-                                # bears onto this beam; drives the auto-computed distribution factor
+                                # bears onto this beam. Drives the auto-computed distribution
+                                # factor AND doubles as the grouping key for critical-panel
+                                # selection (contributions sharing the same edge value are
+                                # treated as being on the same side of the beam).
 
 
 # ============================================================
@@ -313,16 +364,16 @@ class Span:
             factor = p.distribution_factor(c.edge)   # BS 8110 Table 3.15 (or 0.5/1.0 for ribbed/cantilever)
             dead = factor * p.lx_m * p.dead_kNm2(dc)
             live = factor * p.lx_m * p.live_kNm2_factored(dc)
-            rows.append((c.panel_id, c.position, dead, live))
-            candidates.setdefault(c.position, []).append((c.panel_id, dead, live))
+            rows.append((c.panel_id, c.edge, dead, live))
+            candidates.setdefault(c.edge, []).append((c.panel_id, dead, live))
 
         gov_dead_total, gov_live_total = 0.0, 0.0
         self.governing = {}
-        for position, opts in candidates.items():
+        for edge, opts in candidates.items():
             # governing (critical) panel = the one with the larger DEAD load on this side
             crit = max(opts, key=lambda o: o[1])
-            self.governing[position] = dict(panel_id=crit[0], dead=crit[1], live=crit[2],
-                                             all_candidates=opts)
+            self.governing[edge] = dict(panel_id=crit[0], dead=crit[1], live=crit[2],
+                                         all_candidates=opts)
             gov_dead_total += crit[1]
             gov_live_total += crit[2]
 
@@ -727,22 +778,28 @@ class BeamSystem:
 
         # ---- PANEL EDGE CONDITIONS (drives the BS 8110 Table 3.15 factors) ----
         section_title("PANEL EDGE CONDITIONS & CLASSIFICATION")
-        headers = ["Panel", "Slab Type", "ly/lx", "Top", "Bottom", "Left", "Right", "BS 8110 Panel Type"]
+        headers = ["Panel", "Slab Type", "ly/lx", "Spanning", "Top", "Bottom", "Left", "Right", "BS 8110 Panel Type"]
         rows = []
         for i, pnl in self.panels.items():
-            lo, hi = min(pnl.ly_m, pnl.lx_m), max(pnl.ly_m, pnl.lx_m)
-            ratio = f"{hi/lo:.2f}" if lo > 0 else "-"
+            ratio = f"{pnl.spanning_ratio():.2f}" if pnl.lx_m > 0 else "-"
+            spanning = pnl.spanning_type() if pnl.lx_m > 0 else "-"
             if pnl.slab_type == "solid":
-                edge_txt = {k: ("Cont." if v else "Disc.") for k, v in pnl.edge_continuous.items()}
+                ly_set = pnl.ly_edges()
+                edge_txt = {k: (("Cont." if v else "Disc.") + (" (ly)" if k in ly_set else " (lx)"))
+                            for k, v in pnl.edge_continuous.items()}
                 ptype = pnl.panel_type_bs8110()
+                if spanning == "One-way":
+                    ptype += " *"
             else:
                 edge_txt = {k: "-" for k in EDGE_NAMES}
                 ptype = f"N/A ({pnl.slab_type} — fixed factor)"
-            rows.append([str(i), pnl.slab_type.capitalize(), ratio,
+            rows.append([str(i), pnl.slab_type.capitalize(), ratio, spanning,
                         edge_txt["top"], edge_txt["bottom"], edge_txt["left"], edge_txt["right"], ptype])
-        table(headers, rows, [0.09, 0.11, 0.08, 0.09, 0.10, 0.09, 0.09, 0.35], fontsize=6.9,
-              ref="BS 8110-1:1997\nTable 3.14/3.15")
-        text_line("Top/Bottom = long edges (length ly).  Left/Right = short edges (length lx).",
+        table(headers, rows, [0.08, 0.10, 0.07, 0.08, 0.11, 0.11, 0.11, 0.11, 0.23], fontsize=6.5,
+              ref="BS 8110-1:1997\nTable 3.14/3.15.\nSpanning: Two-way if\nly/lx <= 2.0, else\nOne-way.")
+        text_line("(ly)/(lx) after each edge shows which dimension that edge carries for this "
+                  "panel's own orientation.", fontsize=6.8)
+        text_line("* One-way spanning: beta_vx taken at ly/lx = 2.0 (per BS 8110-1:1997 3.5.3.7).",
                   fontsize=6.8)
 
         # ---- WALL LOADING ----
@@ -785,21 +842,21 @@ class BeamSystem:
 
             # -- Load distribution to beam --
             section_title(f"LOAD DISTRIBUTION TO BEAM — SPAN {i+1} ({labels[i]} -> {labels[i+1]})")
-            headers = ["Panel", "Position", "Edge", "Factor", "Lx (m)", "Dead nGk\n(kN/m)", "Live nQk\n(kN/m)"]
+            headers = ["Panel", "Panel Edge\non this Beam", "Factor", "Lx (m)", "Dead nGk\n(kN/m)", "Live nQk\n(kN/m)"]
             rows = []
             for c in s.contributions:
                 p = self.panels[c.panel_id]
-                dead = [d for pid, pos, d, l in s.distribution_rows if pid == c.panel_id and pos == c.position][0]
-                live = [l for pid, pos, d, l in s.distribution_rows if pid == c.panel_id and pos == c.position][0]
-                crit = s.governing.get(c.position, {})
+                dead = [d for pid, edg, d, l in s.distribution_rows if pid == c.panel_id and edg == c.edge][0]
+                live = [l for pid, edg, d, l in s.distribution_rows if pid == c.panel_id and edg == c.edge][0]
+                crit = s.governing.get(c.edge, {})
                 tag = " *" if crit.get('panel_id') == c.panel_id else ""
                 factor = p.distribution_factor(c.edge)
-                rows.append([f"{c.panel_id}{tag}", c.position, c.edge, f"{factor:.3f}",
+                rows.append([f"{c.panel_id}{tag}", c.edge, f"{factor:.3f}",
                             f"{p.lx_m:.2f}", f"{dead:.4f}", f"{live:.4f}"])
             if not rows:
-                rows = [["-", "-", "-", "-", "-", "0", "0"]]
-            table(headers, rows, [0.13, 0.19, 0.11, 0.13, 0.12, 0.16, 0.16],
-                  ref="* = critical/governing panel.\nFactor = BS 8110-1:1997\nTable 3.15 beta (or fixed\n0.5 ribbed / 1.0 cantilever).")
+                rows = [["-", "-", "-", "-", "0", "0"]]
+            table(headers, rows, [0.15, 0.20, 0.14, 0.13, 0.19, 0.19],
+                  ref="* = critical/governing panel\non that edge/side.\nFactor = BS 8110-1:1997\nTable 3.15 beta (or fixed\n0.5 ribbed / 1.0 cantilever).")
             crit_panels = sorted({g['panel_id'] for g in s.governing.values()})
             text_line(f"Take: " + ", ".join(f"Panel {pid}" for pid in crit_panels) if crit_panels
                       else "Take: (no panels assigned)", fontsize=7.8)
