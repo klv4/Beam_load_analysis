@@ -222,7 +222,10 @@ def slab_panel_distribution_factor(panel: "SlabPanel", edge: str) -> float:
     if panel.slab_type == "ribbed":
         return 0.5
     if panel.slab_type == "cantilever":
-        return 1.0
+        # Arrow (loading direction) perpendicular to the beam edge: the whole
+        # cantilever load drains into the beam -> 1.0. Beam lies along the
+        # loading direction (parallel): each side takes half -> 0.5.
+        return 1.0 if panel.arrow_perpendicular else 0.5
     return bs8110_beta_for_edge(panel.edge_continuous, panel.ly_m, panel.lx_m, edge,
                                  panel.ly_edges(), panel.lx_edges())
 
@@ -253,6 +256,12 @@ class SlabPanel:
     # beta_vy) is derived from this one pair of fields.
     primary_edge: str = "left"
     primary_edge_is_ly: bool = False
+    # Ribbed / cantilever only: direction of the rib span (double arrow) or the
+    # cantilever loading direction (single arrow), relative to the reference edge
+    # (= the edge of the panel that sits on the beam being analysed).
+    arrow_perpendicular: bool = True    # True: arrow is perpendicular to the reference edge
+    arrow_flip: bool = False            # cantilever, arrow parallel to edge: sketch direction only
+    rib_lx_m: float = 0.525             # ribbed, ribs parallel to the beam: load width lx (m)
 
     def __post_init__(self):
         # ly is BY DEFINITION the longer dimension — auto-correct if entered
@@ -268,6 +277,35 @@ class SlabPanel:
 
     def lx_edges(self) -> set:
         return {"top", "bottom", "left", "right"} - self.ly_edges()
+
+    def arrow_axis(self) -> str:
+        """'horizontal' or 'vertical' — direction of the rib span / cantilever arrow."""
+        ref_horizontal = self.primary_edge in ("top", "bottom")
+        if self.arrow_perpendicular:
+            return "vertical" if ref_horizontal else "horizontal"
+        return "horizontal" if ref_horizontal else "vertical"
+
+    def arrow_vector(self) -> Tuple[int, int]:
+        """Unit (dx, dy) for the single cantilever arrow (y up). Perpendicular arrows
+        always point AWAY from the reference (beam) edge — the cantilever is fixed there."""
+        if self.arrow_perpendicular:
+            return {"bottom": (0, 1), "top": (0, -1), "left": (1, 0), "right": (-1, 0)}[self.primary_edge]
+        base = (1, 0) if self.arrow_axis() == "horizontal" else (0, 1)
+        return (-base[0], -base[1]) if self.arrow_flip else base
+
+    def span_length_along_arrow(self) -> float:
+        """Panel dimension measured parallel to the arrow direction."""
+        if self.arrow_axis() == "horizontal":
+            return self.ly_m if "top" in self.ly_edges() else self.lx_m
+        return self.ly_m if "left" in self.ly_edges() else self.lx_m
+
+    def load_width_m(self) -> float:
+        """The 'lx' used in  w = factor * lx * (panel load)."""
+        if self.slab_type == "ribbed":
+            return self.span_length_along_arrow() if self.arrow_perpendicular else self.rib_lx_m
+        if self.slab_type == "cantilever":
+            return self.span_length_along_arrow() if self.arrow_perpendicular else self.lx_m
+        return self.lx_m
 
     def spanning_ratio(self) -> float:
         return self.ly_m / self.lx_m if self.lx_m > 0 else float("inf")
@@ -362,8 +400,8 @@ class Span:
         for c in self.contributions:
             p = panels[c.panel_id]
             factor = p.distribution_factor(c.edge)   # BS 8110 Table 3.15 (or 0.5/1.0 for ribbed/cantilever)
-            dead = factor * p.lx_m * p.dead_kNm2(dc)
-            live = factor * p.lx_m * p.live_kNm2_factored(dc)
+            dead = factor * p.load_width_m() * p.dead_kNm2(dc)
+            live = factor * p.load_width_m() * p.live_kNm2_factored(dc)
             rows.append((c.panel_id, c.edge, dead, live))
             candidates.setdefault(c.edge, []).append((c.panel_id, dead, live))
 
@@ -792,7 +830,9 @@ class BeamSystem:
                     ptype += " *"
             else:
                 edge_txt = {k: "-" for k in EDGE_NAMES}
-                ptype = f"N/A ({pnl.slab_type} — fixed factor)"
+                rel = "perp." if pnl.arrow_perpendicular else "parallel"
+                kind = "ribs" if pnl.slab_type == "ribbed" else "load"
+                ptype = f"{pnl.slab_type.capitalize()}: {kind} {rel} to {pnl.primary_edge}"
             rows.append([str(i), pnl.slab_type.capitalize(), ratio, spanning,
                         edge_txt["top"], edge_txt["bottom"], edge_txt["left"], edge_txt["right"], ptype])
         table(headers, rows, [0.08, 0.10, 0.07, 0.08, 0.11, 0.11, 0.11, 0.11, 0.23], fontsize=6.5,
@@ -842,7 +882,7 @@ class BeamSystem:
 
             # -- Load distribution to beam --
             section_title(f"LOAD DISTRIBUTION TO BEAM — SPAN {i+1} ({labels[i]} -> {labels[i+1]})")
-            headers = ["Panel", "Panel Edge\non this Beam", "Factor", "Lx (m)", "Dead nGk\n(kN/m)", "Live nQk\n(kN/m)"]
+            headers = ["Panel", "Panel Edge\non this Beam", "Factor", "Lx used (m)", "Dead nGk\n(kN/m)", "Live nQk\n(kN/m)"]
             rows = []
             for c in s.contributions:
                 p = self.panels[c.panel_id]
@@ -852,7 +892,7 @@ class BeamSystem:
                 tag = " *" if crit.get('panel_id') == c.panel_id else ""
                 factor = p.distribution_factor(c.edge)
                 rows.append([f"{c.panel_id}{tag}", c.edge, f"{factor:.3f}",
-                            f"{p.lx_m:.2f}", f"{dead:.4f}", f"{live:.4f}"])
+                            f"{p.load_width_m():.3f}", f"{dead:.4f}", f"{live:.4f}"])
             if not rows:
                 rows = [["-", "-", "-", "-", "0", "0"]]
             table(headers, rows, [0.15, 0.20, 0.14, 0.13, 0.19, 0.19],

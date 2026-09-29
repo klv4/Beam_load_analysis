@@ -21,12 +21,10 @@ st.set_page_config(page_title="Multi-Span Beam Load Analysis", layout="centered"
 st.title("Multi-span beam — load analysis")
 
 
-def draw_panel_sketch(ly, lx, edges, ly_edges):
-    """A small live sketch of the panel: thick navy edges = continuous,
-    thin dashed grey edges = discontinuous — the 'shade the sides' input.
-    `ly_edges` (a set like {'top','bottom'} or {'left','right'}) says which
-    pair of edges is the ly (long) dimension, so the sketch orients itself
-    to whatever the user specified rather than assuming ly is horizontal."""
+def draw_panel_sketch(ly, lx, edges, ly_edges, ref_edge, arrow=None):
+    """Live sketch of the panel. Orange edge = reference edge (the edge sitting on
+    the beam). Solid panels: thick navy = continuous, thin dashed grey = discontinuous.
+    `arrow` = ("double", (dx,dy)) for ribs or ("single", (dx,dy)) for a cantilever."""
     fig, ax = plt.subplots(figsize=(3.4, 3.4))
     ax.set_xlim(-0.35, 1.35)
     ax.set_ylim(-0.35, 1.35)
@@ -37,10 +35,24 @@ def draw_panel_sketch(ly, lx, edges, ly_edges):
         return dict(color='#1F4E78', lw=4.5, solid_capstyle='butt') if cont else \
                dict(color='#AAAAAA', lw=1.3, linestyle=(0, (4, 3)))
 
-    ax.plot([0, 1], [1, 1], **style(edges['top']))
-    ax.plot([0, 1], [0, 0], **style(edges['bottom']))
-    ax.plot([0, 0], [0, 1], **style(edges['left']))
-    ax.plot([1, 1], [0, 1], **style(edges['right']))
+    seg = {'top': ([0, 1], [1, 1]), 'bottom': ([0, 1], [0, 0]),
+           'left': ([0, 0], [0, 1]), 'right': ([1, 1], [0, 1])}
+    for k, (xs, ys) in seg.items():
+        ax.plot(xs, ys, **style(edges[k] if edges else False))
+    xs, ys = seg[ref_edge]
+    ax.plot(xs, ys, color='#E07B00', lw=6, solid_capstyle='butt', zorder=5)
+    lab = {'top': (0.5, 0.93, 'center', 'top', 0), 'bottom': (0.5, 0.07, 'center', 'bottom', 0),
+           'left': (0.06, 0.5, 'left', 'center', 90), 'right': (0.94, 0.5, 'right', 'center', 90)}[ref_edge]
+    ax.text(lab[0], lab[1], "beam", ha=lab[2], va=lab[3], rotation=lab[4], fontsize=8, color='#E07B00')
+
+    if arrow:
+        kind, (dx, dy) = arrow
+        half = 0.3 if kind == "double" else 0.25
+        p0 = (0.5 - half * dx, 0.5 - half * dy)
+        p1 = (0.5 + half * dx, 0.5 + half * dy)
+        ax.annotate('', xy=p1, xytext=p0, zorder=6,
+                    arrowprops=dict(arrowstyle='<|-|>' if kind == "double" else '-|>',
+                                    lw=2.2, color='#8B1E2E', mutation_scale=16))
 
     top_dim, side_dim = (ly, lx) if "top" in ly_edges else (lx, ly)
     ax.text(0.5, 1.12, f"{'ly' if 'top' in ly_edges else 'lx'} = {top_dim:g} m",
@@ -120,33 +132,50 @@ for i in range(1, int(n_panels) + 1):
             pthk = c7.number_input("Partition thickness (m)", value=0.2, key=f"ppthk{i}")
             pht = c8.number_input("Partition height (m)", value=2.7, key=f"ppht{i}")
 
-        st.markdown("**Distribution factor** (auto — BS 8110-1:1997 Table 3.15)")
-        slab_type_label = st.selectbox(
-            "Panel type",
-            ["Solid slab (Table 3.15 — one-way uses beta_vx at ly/lx = 2.0)",
-             "Ribbed slab (fixed factor = 0.5)", "Cantilever slab (fixed factor = 1.0)"],
-            key=f"pstype{i}")
-        slab_type = {"Solid slab (Table 3.15 — one-way uses beta_vx at ly/lx = 2.0)": "solid",
-                     "Ribbed slab (fixed factor = 0.5)": "ribbed",
-                     "Cantilever slab (fixed factor = 1.0)": "cantilever"}[slab_type_label]
+        st.markdown("**Distribution factor** (auto — BS 8110-1:1997 Table 3.15 for solid slabs)")
+        type_opts = {"Solid slab (Table 3.15 — one-way uses beta_vx at ly/lx = 2.0)": "solid",
+                     "Ribbed slab (factor 0.5, double arrow = rib span)": "ribbed",
+                     "Cantilever slab (single arrow = loading direction)": "cantilever"}
+        slab_type = type_opts[st.selectbox("Panel type", list(type_opts.keys()), key=f"pstype{i}")]
+
+        st.markdown("**Panel edge on this beam — orientation**")
+        st.caption("Pick the edge of this panel that sits on the beam (reference edge). It is applied "
+                   "automatically to 'Panel edge on this beam' under Panel contributions. Also say whether "
+                   "that edge is your ly or lx side.")
+        oc1, oc2 = st.columns(2)
+        primary_edge = oc1.selectbox("Reference edge", ["top", "bottom", "left", "right"],
+                                      index=2, key=f"pref{i}")
+        primary_edge_is_ly = oc2.checkbox(f"'{primary_edge}' edge is the ly ({ly:g} m) side",
+                                           value=False, key=f"prefly{i}")
+        opposite = {"top": "bottom", "bottom": "top", "left": "right", "right": "left"}[primary_edge]
+        pair = {primary_edge, opposite}
+        ly_edges = pair if primary_edge_is_ly else ({"top", "bottom", "left", "right"} - pair)
+        lx_edges = {"top", "bottom", "left", "right"} - ly_edges
 
         edge_continuous = {"top": True, "bottom": True, "left": True, "right": True}
-        primary_edge, primary_edge_is_ly = "left", False
-        ly_edges = {"top", "bottom"}
-        if slab_type == "solid":
-            st.markdown("**Panel edge on this beam — orientation**")
-            st.caption("ly isn't always horizontal — pick a reference edge and say whether it's your "
-                       "ly or lx side, so the sketch below orients correctly.")
-            oc1, oc2 = st.columns(2)
-            primary_edge = oc1.selectbox("Reference edge", ["top", "bottom", "left", "right"],
-                                          index=2, key=f"pref{i}")
-            primary_edge_is_ly = oc2.checkbox(f"'{primary_edge}' edge is the ly ({ly:g} m) side",
-                                               value=False, key=f"prefly{i}")
-            opposite = {"top": "bottom", "bottom": "top", "left": "right", "right": "left"}[primary_edge]
-            pair = {primary_edge, opposite}
-            ly_edges = pair if primary_edge_is_ly else ({"top", "bottom", "left", "right"} - pair)
-            lx_edges = {"top", "bottom", "left", "right"} - ly_edges
+        arrow_perpendicular, arrow_flip, rib_lx = True, False, 0.525
+        if slab_type in ("ribbed", "cantilever"):
+            what = "Rib spanning direction (double arrow)" if slab_type == "ribbed" \
+                else "Cantilever loading direction (single arrow)"
+            rel = st.radio(f"{what} relative to the reference edge",
+                           ["Perpendicular to the reference edge", "Parallel to the reference edge"],
+                           key=f"parrow{i}")
+            arrow_perpendicular = rel.startswith("Perpendicular")
+            if not arrow_perpendicular:
+                if slab_type == "ribbed":
+                    rib_lx = st.number_input("lx — rib load width (m)", value=0.525, step=0.005,
+                                              format="%.3f", key=f"prib{i}")
+                else:
+                    arrow_flip = st.checkbox("Flip arrow direction (sketch only — no effect on load)",
+                                              key=f"pflip{i}")
 
+        panel_obj = SlabPanel(name, t, ly, lx, FINISHES_OPTIONS[fin_key][1], LIVE_LOAD_OPTIONS[live_key][1],
+                              has_partition, plen, pthk, pht, slab_type, edge_continuous,
+                              primary_edge, primary_edge_is_ly,
+                              arrow_perpendicular=arrow_perpendicular, arrow_flip=arrow_flip,
+                              rib_lx_m=rib_lx)
+
+        if slab_type == "solid":
             ec1, ec2 = st.columns([1, 1])
             with ec1:
                 for edge_key in ("top", "bottom", "left", "right"):
@@ -156,13 +185,29 @@ for i in range(1, int(n_panels) + 1):
                         f"{edge_key.capitalize()} continuous ({dim} edge, {dim_val:g} m)",
                         value=True, key=f"e{edge_key}{i}")
             with ec2:
-                st.pyplot(draw_panel_sketch(ly, lx, edge_continuous, ly_edges), width='content')
+                st.pyplot(draw_panel_sketch(ly, lx, edge_continuous, ly_edges, primary_edge), width='content')
             st.caption(f"BS 8110 panel type: **{bs8110_classify_panel(edge_continuous, list(ly_edges), list(lx_edges))}**"
                        + (f"  — *one-way: beta_vx taken at ly/lx = 2.0*" if spanning == "One-way" else ""))
-
-        panels[name] = SlabPanel(name, t, ly, lx, FINISHES_OPTIONS[fin_key][1], LIVE_LOAD_OPTIONS[live_key][1],
-                               has_partition, plen, pthk, pht, slab_type, edge_continuous,
-                               primary_edge, primary_edge_is_ly)
+        else:
+            vx, vy = panel_obj.arrow_vector() if slab_type == "cantilever" else \
+                ((1, 0) if panel_obj.arrow_axis() == "horizontal" else (0, 1))
+            sk1, sk2 = st.columns([1, 1])
+            with sk2:
+                st.pyplot(draw_panel_sketch(ly, lx, None, ly_edges, primary_edge,
+                                            arrow=("double" if slab_type == "ribbed" else "single", (vx, vy))),
+                          width='content')
+            with sk1:
+                f_ = panel_obj.distribution_factor(primary_edge)
+                st.markdown(f"Factor = **{f_:.2f}**  \nLoad width lx = **{panel_obj.load_width_m():.3f} m**")
+                if slab_type == "ribbed":
+                    st.caption("Ribs perpendicular to the beam: lx = panel length along the ribs."
+                               if arrow_perpendicular else
+                               "Ribs parallel to the beam: lx = rib load width entered above.")
+                else:
+                    st.caption("Cantilever perpendicular to the beam: factor 1.0, lx = projection length."
+                               if arrow_perpendicular else
+                               "Beam runs along the cantilever direction: factor 0.5, lx = shortest panel dimension.")
+        panels[name] = panel_obj
         st.caption(f"-> Gk = {panels[name].dead_kNm2(dc):.3f} kN/m²   Qk = {panels[name].live_kNm2_factored(dc):.3f} kN/m²"
                    f"  (Step 5: calculated automatically)")
 
@@ -192,20 +237,14 @@ for i in range(int(n_spans)):
             c1, c2 = st.columns(2)
             pid = c1.selectbox("Panel", options=list(panels.keys()), key=f"s{i}c{j}p")
             panel = panels[pid]
-            if panel.slab_type == "solid":
-                default_idx = ["left", "right", "top", "bottom"].index(panel.primary_edge) \
-                    if panel.primary_edge in ("left", "right", "top", "bottom") else 0
-                edge = c2.selectbox(
-                    "Panel edge on this beam",
-                    options=["left", "right", "top", "bottom"], index=default_idx, key=f"s{i}c{j}edge")
-                st.caption("Contributions sharing the same edge are treated as being on the same "
-                           "side of the beam (for critical-panel selection).")
-            else:
-                c2.markdown(f"*({panel.slab_type} slab — factor fixed, edge not needed)*")
-                edge = "left"  # unused for ribbed/cantilever, but a value is required
+            edge = panel.primary_edge
+            c2.selectbox("Panel edge on this beam", options=[edge], index=0, disabled=True,
+                         key=f"s{i}c{j}edge_{pid}_{edge}")
+            st.caption("Set from the panel's reference edge (Step 3-4). Contributions sharing the same "
+                       "edge are treated as being on the same side of the beam.")
             contributions.append(PanelContribution(pid, edge))
             factor = panel.distribution_factor(edge)
-            st.caption(f"-> distribution factor = {factor:.3f}")
+            st.caption(f"-> distribution factor = {factor:.3f}   |   Lx = {panel.load_width_m():.3f} m")
 
         wall_here = False
         if wall_defined:

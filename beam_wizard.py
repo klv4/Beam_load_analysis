@@ -156,32 +156,43 @@ def run_wizard():
         print("    Panel type:")
         print("      1. Solid slab (uses BS 8110-1:1997 Table 3.15 — two-way as normal,")
         print("         one-way takes beta_vx at ly/lx = 2.0)")
-        print("      2. Ribbed slab (fixed distribution factor = 0.5)")
-        print("      3. Cantilever slab (fixed distribution factor = 1.0)")
+        print("      2. Ribbed slab (factor 0.5; double arrow = rib span direction)")
+        print("      3. Cantilever slab (single arrow = loading direction; factor 1.0, or 0.5 if the")
+        print("         beam runs along the loading direction)")
         slab_type_choice = ask_str("    Choose", default="1")
         slab_type = {"1": "solid", "2": "ribbed", "3": "cantilever"}.get(slab_type_choice, "solid")
 
         edge_continuous = {"top": True, "bottom": True, "left": True, "right": True}
-        primary_edge, primary_edge_is_ly = "left", False
+
+        # Orientation for ALL panel types: the reference edge is the edge of the panel that
+        # sits on the beam. It is applied automatically to the panel contributions in Step 7.
+        print(f"\n    Panel edge on this beam — orientation")
+        print(f"      Pick the edge of panel '{name}' that sits on the beam as the reference edge,")
+        print(f"      and tell me whether THAT edge (and its opposite) is the ly side or the lx side.")
+        while True:
+            primary_edge = ask_str("      Reference edge (top/bottom/left/right)", default="left").strip().lower()
+            if primary_edge in ("top", "bottom", "left", "right"):
+                break
+            print("      Please enter one of: top, bottom, left, right")
+        primary_edge_is_ly = ask_yesno(f"      Is the '{primary_edge}' edge the ly (long, {ly} m) side?"
+                                        f" ('n' means it's the lx ({lx} m) side)", "n")
+
+        opposite = {"top": "bottom", "bottom": "top", "left": "right", "right": "left"}[primary_edge]
+        ly_pair = {primary_edge, opposite} if primary_edge_is_ly else \
+                  ({"top", "bottom", "left", "right"} - {primary_edge, opposite})
+
+        arrow_perpendicular, arrow_flip, rib_lx = True, False, 0.525
+        if slab_type in ("ribbed", "cantilever"):
+            what = "ribs span (double arrow <-->)" if slab_type == "ribbed" else "cantilever loads (single arrow -->)"
+            arrow_perpendicular = ask_yesno(
+                f"      Does the direction the {what} run PERPENDICULAR to the '{primary_edge}' reference edge?", "y")
+            if not arrow_perpendicular:
+                if slab_type == "ribbed":
+                    rib_lx = ask_float("      lx — rib load width (m)", default=0.525)
+                else:
+                    arrow_flip = ask_yesno("      Flip the arrow direction (sketch only — no effect on load)?", "n")
+
         if slab_type == "solid":
-            # Orientation FIRST: ly isn't always the horizontal pair — ask which physical
-            # edge carries which dimension before drawing anything, so the sketch below
-            # is labelled correctly.
-            print(f"\n    Panel edge on this beam — orientation")
-            print(f"      Pick one edge of panel '{name}' as a reference, and tell me whether")
-            print(f"      THAT edge (and its opposite) is the ly side or the lx side.")
-            while True:
-                primary_edge = ask_str("      Reference edge (top/bottom/left/right)", default="left").strip().lower()
-                if primary_edge in ("top", "bottom", "left", "right"):
-                    break
-                print("      Please enter one of: top, bottom, left, right")
-            primary_edge_is_ly = ask_yesno(f"      Is the '{primary_edge}' edge the ly (long, {ly} m) side?"
-                                            f" ('n' means it's the lx ({lx} m) side)", "n")
-
-            opposite = {"top": "bottom", "bottom": "top", "left": "right", "right": "left"}[primary_edge]
-            ly_pair = {primary_edge, opposite} if primary_edge_is_ly else \
-                      ({"top", "bottom", "left", "right"} - {primary_edge, opposite})
-
             print(f"\n    Mark each edge of panel '{name}' as CONTINUOUS (built in / carries over an "
                   f"adjacent support) or DISCONTINUOUS (simply supported / a free edge).")
             print(f"      ly = {ly} m  -> {' and '.join(sorted(ly_pair))} edge(s)")
@@ -209,7 +220,13 @@ def run_wizard():
 
         panels[name] = SlabPanel(name, thickness, ly, lx, finishes, live,
                                   has_partition, plen, pthk, pht, slab_type, edge_continuous,
-                                  primary_edge, primary_edge_is_ly)
+                                  primary_edge, primary_edge_is_ly,
+                                  arrow_perpendicular=arrow_perpendicular, arrow_flip=arrow_flip,
+                                  rib_lx_m=rib_lx)
+        if slab_type != "solid":
+            pn = panels[name]
+            print(f"      -> factor = {pn.distribution_factor(primary_edge):.2f}, "
+                  f"load width lx = {pn.load_width_m():.3f} m\n")
 
     # ---------------- STEP 5: slab loading (auto) ----------------
     print("\nSTEP 5 — Slab loading calculation")
@@ -248,22 +265,12 @@ def run_wizard():
                     break
                 print(f"    '{pid}' isn't a defined panel — choose from: {', '.join(panels.keys())}")
             panel = panels[pid]
-            if panel.slab_type == "solid":
-                while True:
-                    edge = ask_str(f"    Contribution {j+1}: which EDGE of panel '{pid}' bears onto "
-                                    f"this beam? (top/bottom/left/right) — this also groups it with any "
-                                    f"other contribution sharing the same edge as being on the same side "
-                                    f"of the beam", default=panel.primary_edge)
-                    edge = edge.strip().lower()
-                    if edge in ("top", "bottom", "left", "right"):
-                        break
-                    print("    Please enter one of: top, bottom, left, right")
-            else:
-                edge = "left"  # not used for ribbed/cantilever (fixed factor), but a value is required
+            edge = panel.primary_edge
+            print(f"    Panel edge on this beam: '{edge}' (from the panel's reference edge — not editable here)")
             contributions.append(PanelContribution(pid, edge))
             factor = panel.distribution_factor(edge)
             print(f"    -> distribution factor = {factor:.3f}"
-                  + ("" if panel.slab_type == "solid" else f"  ({panel.slab_type} slab, fixed)"))
+                  + f"   Lx = {panel.load_width_m():.3f} m")
 
         wall_here = ask_yesno("  Is the wall present on THIS span?", "n") if wall_defined else False
 
