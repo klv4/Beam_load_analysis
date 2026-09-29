@@ -25,6 +25,7 @@ Engineering model
 """
 
 from dataclasses import dataclass, field
+import math
 from typing import List, Dict, Tuple, Optional
 import matplotlib
 matplotlib.use("Agg")
@@ -287,9 +288,9 @@ class SlabPanel:
 
     def arrow_vector(self) -> Tuple[int, int]:
         """Unit (dx, dy) for the single cantilever arrow (y up). Perpendicular arrows
-        always point AWAY from the reference (beam) edge — the cantilever is fixed there."""
+        point TOWARDS the reference (beam) edge — all the load goes into the beam."""
         if self.arrow_perpendicular:
-            return {"bottom": (0, 1), "top": (0, -1), "left": (1, 0), "right": (-1, 0)}[self.primary_edge]
+            return {"bottom": (0, -1), "top": (0, 1), "left": (-1, 0), "right": (1, 0)}[self.primary_edge]
         base = (1, 0) if self.arrow_axis() == "horizontal" else (0, 1)
         return (-base[0], -base[1]) if self.arrow_flip else base
 
@@ -306,6 +307,36 @@ class SlabPanel:
         if self.slab_type == "cantilever":
             return self.span_length_along_arrow() if self.arrow_perpendicular else self.lx_m
         return self.lx_m
+
+    def describe_bearing(self, edge: str) -> List[str]:
+        """Worked-calculation lines describing how this panel bears on the beam (for the PDF)."""
+        ly, lx = self.ly_m, self.lx_m
+        head = f"Panel {self.panel_id}: {self.thickness_mm:g} mm, bears on beam via {edge} edge"
+        if self.slab_type == "solid":
+            ratio = self.spanning_ratio()
+            is_ly = edge in self.ly_edges()
+            cont = self.edge_continuous[edge]
+            if ratio <= 2.0:
+                sp = f"ly/lx = {ly:.3f}/{lx:.3f} = {ratio:.2f} ≤ 2.0  ⇒  Two-way spanning slab"
+            else:
+                sp = (f"ly/lx = {ly:.3f}/{lx:.3f} = {ratio:.2f} > 2.0  ⇒  One-way spanning slab, "
+                      f"take βvx at ly/lx = 2.0")
+            return [head, sp, self.panel_type_bs8110(),
+                    f"Edge on beam: {'continuous' if cont else 'discontinuous'} ({'ly' if is_ly else 'lx'} edge)",
+                    f"β{'vx' if is_ly else 'vy'} = {self.distribution_factor(edge):.3f}",
+                    f"w = β · n · lx ,   lx = {lx:.3f} m"]
+        rel = "perpendicular" if self.arrow_perpendicular else "parallel"
+        if self.slab_type == "ribbed":
+            why = ("lx = panel length along the ribs" if self.arrow_perpendicular
+                   else "lx = rib load width")
+            return [head, f"Ribbed slab, ribs span (double arrow) {rel} to the beam",
+                    f"Panel size: ly = {ly:.3f} m, lx = {lx:.3f} m",
+                    "w = 0.5 · n · lx", f"lx = {self.load_width_m():.3f} m  ({why})"]
+        why = ("lx = cantilever projection, all load to beam" if self.arrow_perpendicular
+               else "beam along loading direction, lx = shortest panel dimension")
+        return [head, f"Cantilever slab, loading direction (single arrow) {rel} to the beam",
+                f"Panel size: ly = {ly:.3f} m, lx = {lx:.3f} m",
+                f"w = {self.distribution_factor(edge):.1f} · n · lx", f"lx = {self.load_width_m():.3f} m  ({why})"]
 
     def spanning_ratio(self) -> float:
         return self.ly_m / self.lx_m if self.lx_m > 0 else float("inf")
@@ -336,6 +367,69 @@ class SlabPanel:
 
     def live_kNm2_factored(self, dc: DesignCriteria) -> float:
         return dc.factor_live * self.live_kNm2
+
+
+# ============================================================
+# Panel sketch (shared by the Streamlit app and the PDF report)
+# ============================================================
+def draw_panel_sketch_ax(ax, panel):
+    """Draws a panel sketch on `ax`.
+    Solid: thick navy edge + hatch ticks = continuous, thin dashed grey = discontinuous.
+    Orange line just INSIDE an edge = the beam (reference edge) — it sits inside the panel
+    so it never covers the continuity shading. Ribbed: double arrow = rib span.
+    Cantilever: single arrow = loading direction (points toward the beam when perpendicular)."""
+    ax.set_xlim(-0.3, 1.3)
+    ax.set_ylim(-0.3, 1.3)
+    ax.set_aspect('equal')
+    ax.axis('off')
+    seg = {'top': ([0, 1], [1, 1]), 'bottom': ([0, 1], [0, 0]),
+           'left': ([0, 0], [0, 1]), 'right': ([1, 1], [0, 1])}
+    normal = {'top': (0, 1), 'bottom': (0, -1), 'left': (-1, 0), 'right': (1, 0)}
+    solid = panel.slab_type == "solid"
+    for k, (xs, ys) in seg.items():
+        cont = panel.edge_continuous[k] if solid else None
+        if cont is True:
+            ax.plot(xs, ys, color='#1F4E78', lw=3.0, solid_capstyle='butt', zorder=3)
+            nx, ny = normal[k]
+            for t in [0.05 + 0.9 * j / 9 for j in range(10)]:
+                px, py = (t, ys[0]) if k in ('top', 'bottom') else (xs[0], t)
+                tx, ty = (0.06, 0) if k in ('top', 'bottom') else (0, 0.06)
+                ax.plot([px, px + 0.06 * nx + tx], [py, py + 0.06 * ny + ty], color='#1F4E78', lw=0.9)
+        elif cont is False:
+            ax.plot(xs, ys, color='#999999', lw=1.2, linestyle=(0, (4, 3)), zorder=2)
+        else:
+            ax.plot(xs, ys, color='#888888', lw=1.2, zorder=2)
+    o = 0.055
+    inside = {'top': ([0.05, 0.95], [1 - o, 1 - o]), 'bottom': ([0.05, 0.95], [o, o]),
+              'left': ([o, o], [0.05, 0.95]), 'right': ([1 - o, 1 - o], [0.05, 0.95])}
+    bx, by = inside[panel.primary_edge]
+    ax.plot(bx, by, color='#E07B00', lw=2.6, solid_capstyle='butt', zorder=4)
+    lab = {'top': (0.5, 0.86, 'center', 'top', 0), 'bottom': (0.5, 0.14, 'center', 'bottom', 0),
+           'left': (0.15, 0.5, 'left', 'center', 90), 'right': (0.85, 0.5, 'right', 'center', 90)}[panel.primary_edge]
+    ax.text(lab[0], lab[1], "beam", ha=lab[2], va=lab[3], rotation=lab[4], fontsize=7, color='#E07B00')
+
+    if panel.slab_type in ("ribbed", "cantilever"):
+        if panel.slab_type == "cantilever":
+            dx, dy = panel.arrow_vector()
+            half, style_ = 0.25, '-|>'
+        else:
+            dx, dy = (1, 0) if panel.arrow_axis() == "horizontal" else (0, 1)
+            half, style_ = 0.3, '<|-|>'
+        ax.annotate('', xy=(0.5 + half * dx, 0.5 + half * dy), xytext=(0.5 - half * dx, 0.5 - half * dy),
+                    zorder=6, arrowprops=dict(arrowstyle=style_, lw=2.0, color='#8B1E2E', mutation_scale=14))
+
+    ly_e = panel.ly_edges()
+    top_dim, side_dim = (panel.ly_m, panel.lx_m) if "top" in ly_e else (panel.lx_m, panel.ly_m)
+    ax.text(0.5, 1.13, f"{'ly' if 'top' in ly_e else 'lx'} = {top_dim:g} m", ha='center', va='bottom', fontsize=8)
+    ax.text(1.13, 0.5, f"{'ly' if 'left' in ly_e else 'lx'} = {side_dim:g} m", ha='left', va='center',
+            fontsize=8, rotation=90)
+    ax.text(0.5, -0.1, f"Panel {panel.panel_id}", ha='center', va='top', fontsize=8.5, fontweight='bold')
+
+
+def panel_sketch_figure(panel):
+    fig, ax = plt.subplots(figsize=(3.4, 3.4))
+    draw_panel_sketch_ax(ax, panel)
+    return fig
 
 
 # ============================================================
@@ -420,6 +514,32 @@ class Span:
         self.udl_live = gov_live_total
         self.distribution_rows = rows
         return rows
+
+    def reaction_terms(self, side: str, kind: str) -> List[Tuple[str, float]]:
+        """Worked terms (text, value) making up this span's reaction at side 'L' or 'R'
+        for kind 'dead' or 'live' — mirrors reactions() exactly."""
+        L = self.length_m
+        w = self.udl_dead if kind == "dead" else self.udl_live
+        loads = [(pl, pl.dead_kN if kind == "dead" else pl.live_kN) for pl in self.point_loads]
+        if self.left_condition == "Cantilever":
+            full = (side == "R")
+        elif self.right_condition == "Cantilever":
+            full = (side == "L")
+        else:
+            full = None
+        terms = []
+        if full is True:
+            if w:
+                terms.append((f"{w:.2f} × {L:.3f}", w * L))
+            terms += [(f"{P:.2f}", P) for _, P in loads if P]
+        elif full is None:
+            if w:
+                terms.append((f"{w:.2f} × {L:.3f}/2", w * L / 2))
+            for pl, P in loads:
+                if P:
+                    a = (L - pl.position_m) if side == "L" else pl.position_m
+                    terms.append((f"{P:.2f} × {a:.3f}/{L:.3f}", P * a / L))
+        return terms
 
     def reactions(self) -> Tuple[Dict[str, float], Dict[str, float]]:
         """STEP 9 — returns (R_left, R_right), each {'dead':.., 'live':..},
@@ -697,263 +817,344 @@ class BeamSystem:
         return filename
 
 
-    # -------------------- STEP 12: PDF report (matches the Excel layout) --------------------
+    # -------------------- STEP 12: PDF report (calculation-sheet style) --------------------
     def generate_pdf(self, filename: str = "beam_report.pdf") -> str:
-        """
-        Builds a PDF using real gridded tables that mirror the source
-        spreadsheet's sections exactly (Slab Loading & Factoring, Wall
-        Loading, Design Criteria & Materials, Load Distribution, Support
-        Reactions, Total Support Reactions), with the 'Design Ref.' code
-        citation on the left and the headline 'Output' on the right of each
-        table, matching columns A and K of the sheet.
-        """
+        """Calculation-sheet PDF: design criteria first, then slab loading, wall loading,
+        then per-span panel sketches with worked calculations, support reactions with
+        worked steps, totals and the load/reaction diagram. Design Ref on the left,
+        Output on the right of each step, as on a hand calculation sheet."""
+        import re
+        import textwrap
         p, dc = self.project, self.dc
         BLUE = '#1F4E78'
         LEFT, RIGHT = 0.05, 0.95
         REF_W, OUT_W = 0.11, 0.14
-        TABLE_X0, TABLE_X1 = LEFT + REF_W, RIGHT - OUT_W
-        TOP, BOTTOM = 0.96, 0.05
+        X0, X1 = LEFT + REF_W, RIGHT - OUT_W
+        TOP, BOTTOM = 0.955, 0.05
+        STEP = 0.0165
+        PAGE_W_IN, PAGE_H_IN = 9.0, 12.4
+        labels = self.support_labels()
 
         pages = []
-        fig, ax, y = None, None, TOP
+        st = {"fig": None, "ax": None, "y": TOP}
 
         def new_page():
-            nonlocal fig, ax, y
-            fig = plt.figure(figsize=(9.0, 12.4))
+            fig = plt.figure(figsize=(PAGE_W_IN, PAGE_H_IN))
             ax = fig.add_axes([0, 0, 1, 1])
             ax.axis('off'); ax.set_xlim(0, 1); ax.set_ylim(0, 1); ax.set_autoscale_on(False)
-            ax.text(LEFT, 0.985, "DESIGN REF", fontsize=7, fontweight='bold', color='#888888',
-                    transform=ax.transAxes)
-            ax.text(TABLE_X1 + 0.01, 0.985, "OUTPUT", fontsize=7, fontweight='bold', color='#888888',
-                    transform=ax.transAxes)
-            ax.plot([0, 1], [0.978, 0.978], color='#CCCCCC', lw=0.6, transform=ax.transAxes)
-            y = TOP
+            ax.text(LEFT, 0.985, "DESIGN REF", fontsize=7, fontweight='bold', color='#888888')
+            ax.text(X1 + 0.01, 0.985, "OUTPUT", fontsize=7, fontweight='bold', color='#888888')
+            ax.text(0.5, 0.985, f"{p.job_no}   |   {p.element}   |   {p.date}", fontsize=7,
+                    color='#888888', ha='center')
+            ax.plot([0, 1], [0.978, 0.978], color='#CCCCCC', lw=0.6)
+            st.update(fig=fig, ax=ax, y=TOP, ref_y=2.0, out_y=2.0)
             pages.append(fig)
 
         def ensure_space(h):
-            nonlocal y
-            if y - h < BOTTOM:
+            if st["y"] - h < BOTTOM:
                 new_page()
 
-        def section_title(text):
-            nonlocal y
-            ensure_space(0.05)
-            ax.add_patch(patches.Rectangle((0, y - 0.022), 1, 0.028, transform=ax.transAxes,
-                                            facecolor=BLUE, edgecolor='none', zorder=1))
-            ax.text(0.5, y - 0.008, text, fontsize=10.5, fontweight='bold', color='white',
-                    ha='center', va='center', zorder=2, transform=ax.transAxes)
-            y -= 0.038
+        def chars_for(fs, width_frac):
+            return max(20, int(width_frac * PAGE_W_IN / (0.56 * fs / 72.0)))
 
-        def side_note(ref="", output=""):
-            """Attach a Design Ref (left) / Output (right) note aligned to the table about to be drawn."""
-            nonlocal y
+        def side(ref="", out="", yy=None):
+            # side notes never reserve vertical space; a note that would overlap the
+            # previous one in its column is nudged down beneath it instead.
+            ax, y = st["ax"], (st["y"] if yy is None else yy)
             if ref:
-                ax.text(LEFT, y, ref, fontsize=7.2, color='#666666', style='italic', va='top',
-                        transform=ax.transAxes, wrap=True)
-            if output:
-                ax.text(TABLE_X1 + 0.01, y, output, fontsize=7.6, color=BLUE, fontweight='bold',
-                        va='top', transform=ax.transAxes)
+                yr = min(y, st["ref_y"])
+                ax.text(LEFT, yr, ref, fontsize=6.8, color='#666666', style='italic', va='top')
+                st["ref_y"] = yr - (ref.count("\n") + 1) * 0.0125 - 0.004
+            if out:
+                yo = min(y, st["out_y"])
+                ax.text(X1 + 0.01, yo, out, fontsize=7.6, color=BLUE, fontweight='bold', va='top')
+                st["out_y"] = yo - (out.count("\n") + 1) * 0.0135 - 0.004
+
+        def line(txt, indent=0.0, bold=False, fs=7.8, ref="", out="", color='black'):
+            wrapped = textwrap.wrap(txt, chars_for(fs, X1 - X0 - indent), subsequent_indent="    ",
+                                    break_long_words=False, break_on_hyphens=False) or [""]
+            need = len(wrapped) * STEP
+            ensure_space(need)
+            ax = st["ax"]
+            side(ref, out)
+            for k, w in enumerate(wrapped):
+                ax.text(X0 + indent, st["y"] - k * STEP, w, fontsize=fs, va='top', color=color,
+                        fontweight='bold' if bold else 'normal')
+            st["y"] -= len(wrapped) * STEP
+
+        def heading(txt, ref="", out=""):
+            ensure_space(STEP * 2)
+            ax = st["ax"]
+            side(ref, out)
+            ax.text(X0, st["y"], txt, fontsize=8.6, fontweight='bold', va='top')
+            wline = min(X1 - X0, len(txt) * 0.0068)
+            ax.plot([X0, X0 + wline], [st["y"] - 0.0135] * 2, color='black', lw=0.7)
+            st["y"] -= STEP * 1.25
+
+        def gap(k=0.5):
+            st["y"] -= STEP * k
+
+        def section_title(text):
+            st["y"] = min(st["y"], st["out_y"], st["ref_y"])   # clear any tall side note first
+            ensure_space(0.06)
+            ax = st["ax"]
+            ax.add_patch(patches.Rectangle((0, st["y"] - 0.022), 1, 0.028, facecolor=BLUE,
+                                            edgecolor='none', zorder=1))
+            ax.text(0.5, st["y"] - 0.008, text, fontsize=10.5, fontweight='bold', color='white',
+                    ha='center', va='center', zorder=2)
+            st["y"] -= 0.042
 
         def table(headers, rows, col_fracs, row_h=0.021, fontsize=7.3, ref="", output=""):
-            """Draws a bordered grid table via ax.table, anchored at the current y cursor."""
-            nonlocal y
             n_rows = len(rows) + 1
             height = row_h * n_rows
             ensure_space(height + 0.01)
-            y0 = y - height
-            width = TABLE_X1 - TABLE_X0
-            side_note(ref, output)
-            tbl = ax.table(cellText=rows, colLabels=headers,
-                            bbox=[TABLE_X0, y0, width, height],
-                            colWidths=col_fracs, cellLoc='center')
+            ax = st["ax"]
+            y0 = st["y"] - height
+            side(ref, output)
+            tbl = ax.table(cellText=rows, colLabels=headers, bbox=[X0, y0, X1 - X0, height],
+                           colWidths=col_fracs, cellLoc='center')
             tbl.auto_set_font_size(False)
             tbl.set_fontsize(fontsize)
             for j in range(len(headers)):
-                cell = tbl[0, j]
-                cell.set_facecolor(BLUE)
-                cell.get_text().set_color('white')
-                cell.get_text().set_fontweight('bold')
-                cell.get_text().set_fontsize(fontsize)
+                c = tbl[0, j]
+                c.set_facecolor(BLUE); c.get_text().set_color('white')
+                c.get_text().set_fontweight('bold'); c.get_text().set_fontsize(fontsize)
             for (r, c), cell in tbl.get_celld().items():
-                cell.set_edgecolor('#AAAAAA')
-                cell.set_linewidth(0.5)
-            y = y0 - 0.012
-            return tbl
+                cell.set_edgecolor('#AAAAAA'); cell.set_linewidth(0.5)
+            st["y"] = y0 - 0.012
 
-        def text_line(txt, fontsize=8.3, bold=False, indent=0.0):
-            nonlocal y
-            ensure_space(0.02)
-            ax.text(TABLE_X0 + indent, y, txt, fontsize=fontsize,
-                    fontweight='bold' if bold else 'normal', va='top', transform=ax.transAxes)
-            y -= 0.02
+        def sketch_block(panel, lines, ref="", out=""):
+            """Panel sketch on the left, worked calculation lines to its right."""
+            SK_H = 0.138
+            SK_W = SK_H * PAGE_H_IN / PAGE_W_IN
+            tx = X0 + SK_W + 0.015
+            cw = chars_for(7.6, X1 - tx)
+            wrapped = []
+            for ln in lines:
+                wrapped += textwrap.wrap(ln, cw, subsequent_indent="   ", break_long_words=False,
+                                         break_on_hyphens=False) or [""]
+            h = max(SK_H, len(wrapped) * STEP) + 0.01
+            ensure_space(h)
+            ax = st["ax"]
+            side(ref, out)
+            sax = ax.inset_axes([X0, st["y"] - SK_H, SK_W, SK_H])
+            draw_panel_sketch_ax(sax, panel)
+            for k, w in enumerate(wrapped):
+                ax.text(tx, st["y"] - k * STEP, w, fontsize=7.6, va='top',
+                        fontweight='bold' if k == 0 else 'normal')
+            st["y"] -= h
+
+        def num_of(txt):
+            m = re.search(r'\d+(\.\d+)?', str(txt))
+            return m.group(0) if m else None
 
         new_page()
 
-        # ---- Project header ----
-        ax.text(LEFT, y, p.firm_name, fontsize=16, fontweight='bold', transform=ax.transAxes)
-        y -= 0.026
-        ax.text(LEFT, y, p.address, fontsize=8.5, transform=ax.transAxes)
-        y -= 0.035
-        header_rows = [
+        # ================= Project header =================
+        ax = st["ax"]
+        ax.text(LEFT, st["y"], p.firm_name, fontsize=16, fontweight='bold')
+        st["y"] -= 0.026
+        ax.text(LEFT, st["y"], p.address, fontsize=8.5)
+        st["y"] -= 0.035
+        table([""] * 6, [
             ["Job No.", p.job_no, "Designer", p.designer, "Date", p.date],
             ["Element", p.element, "", "", "Material", p.material],
             ["Type", p.beam_type, "Spans", str(len(self.spans)), "Revision", p.revision],
             ["Location", p.location, "Calc. Sheet No.", p.calc_sheet_no, "", ""],
-        ]
-        table([""] * 6, header_rows, [0.13, 0.22, 0.13, 0.19, 0.11, 0.22], row_h=0.02, fontsize=7.6)
+        ], [0.13, 0.22, 0.13, 0.19, 0.11, 0.22], row_h=0.02, fontsize=7.6)
 
-        # ---- SLAB LOADING AND FACTORING ----
-        section_title("SLAB LOADING AND FACTORING")
-        headers = ["Panel", "Self Weight\n(kN/m2)", "Finishes\n(kN/m2)", "Partition\n(kN/m2)",
-                   "Live Loads\n(kN/m2)", "Dead nGk\n(kN/m2)", "Live nQk\n(kN/m2)"]
-        rows = []
-        for i, pnl in self.panels.items():
-            rows.append([str(i), f"{pnl.self_weight_kNm2(dc):.3f}", f"{pnl.finishes_kNm2:.2f}",
-                        f"{pnl.partition_kNm2(dc):.3f}", f"{pnl.live_kNm2:.2f}",
-                        f"{pnl.dead_kNm2(dc):.3f}", f"{pnl.live_kNm2_factored(dc):.3f}"])
-        table(headers, rows, [0.10, 0.16, 0.14, 0.16, 0.14, 0.15, 0.15],
-              ref="BS 6399-1:1996\nTable 1")
-
-        # ---- PANEL EDGE CONDITIONS (drives the BS 8110 Table 3.15 factors) ----
-        section_title("PANEL EDGE CONDITIONS & CLASSIFICATION")
-        headers = ["Panel", "Slab Type", "ly/lx", "Spanning", "Top", "Bottom", "Left", "Right", "BS 8110 Panel Type"]
-        rows = []
-        for i, pnl in self.panels.items():
-            ratio = f"{pnl.spanning_ratio():.2f}" if pnl.lx_m > 0 else "-"
-            spanning = pnl.spanning_type() if pnl.lx_m > 0 else "-"
-            if pnl.slab_type == "solid":
-                ly_set = pnl.ly_edges()
-                edge_txt = {k: (("Cont." if v else "Disc.") + (" (ly)" if k in ly_set else " (lx)"))
-                            for k, v in pnl.edge_continuous.items()}
-                ptype = pnl.panel_type_bs8110()
-                if spanning == "One-way":
-                    ptype += " *"
-            else:
-                edge_txt = {k: "-" for k in EDGE_NAMES}
-                rel = "perp." if pnl.arrow_perpendicular else "parallel"
-                kind = "ribs" if pnl.slab_type == "ribbed" else "load"
-                ptype = f"{pnl.slab_type.capitalize()}: {kind} {rel} to {pnl.primary_edge}"
-            rows.append([str(i), pnl.slab_type.capitalize(), ratio, spanning,
-                        edge_txt["top"], edge_txt["bottom"], edge_txt["left"], edge_txt["right"], ptype])
-        table(headers, rows, [0.08, 0.10, 0.07, 0.08, 0.11, 0.11, 0.11, 0.11, 0.23], fontsize=6.5,
-              ref="BS 8110-1:1997\nTable 3.14/3.15.\nSpanning: Two-way if\nly/lx <= 2.0, else\nOne-way.")
-        text_line("(ly)/(lx) after each edge shows which dimension that edge carries for this "
-                  "panel's own orientation.", fontsize=6.8)
-        text_line("* One-way spanning: beta_vx taken at ly/lx = 2.0 (per BS 8110-1:1997 3.5.3.7).",
-                  fontsize=6.8)
-
-        # ---- WALL LOADING ----
-        section_title("WALL LOADING")
-        headers = ["Present\nanywhere", "Thickness (m)", "Height (m)", "Load (kN/m)", "Factored nGk (kN/m)"]
-        any_wall = any(s.wall_present for s in self.spans)
-        rows = [["Yes" if any_wall else "No", f"{self.wall.thickness_m}", f"{self.wall.height_m}",
-                 f"{self.wall.thickness_m*self.wall.height_m*dc.wall_density:.3f}",
-                 f"{self.wall.factored_dead_kNm(dc):.3f}"]]
-        table(headers, rows, [0.2, 0.2, 0.2, 0.2, 0.2], ref="BS 8110-1:1997",
-              output=f"nGk={self.wall.factored_dead_kNm(dc):.3f} kN/m")
-
-        # ---- DESIGN CRITERIA & MATERIALS ----
+        # ================= DESIGN CRITERIA (first) =================
         section_title("DESIGN CRITERIA & MATERIALS")
-        headers = ["Parameter", "Value", "Unit"]
-        live_rows = [[f"Live Load — {label}", f"{val}", "kN/m2"] for label, val in LIVE_LOAD_OPTIONS.values()]
+        fcu = num_of(dc.concrete_grade)
+        fy = "460" if "high" in dc.steel_grade.lower() else None
+        line(f"fcu = {fcu} N/mm²   ({dc.concrete_grade})" if fcu else f"Concrete: {dc.concrete_grade}",
+             ref="BS 8110-1:1997\nTables 3.3 & 3.4")
+        line(f"fy = fyv = {fy} N/mm²   ({dc.steel_grade})" if fy else f"Reinforcement: {dc.steel_grade}")
+        line(f"Exposure condition = {dc.exposure_condition}")
+        line(f"Fire resistance = {dc.fire_resistance_hours:g} hours")
+        line(f"Cover = {dc.concrete_cover_mm:.0f} mm", out=f"Provide {dc.concrete_cover_mm:.0f} mm\ncover")
+        gap(0.6)
         rows = [
-            ["Concrete Density", f"{dc.concrete_density:.0f}", "kN/m3"],
-            ["Wall Material Density", f"{dc.wall_density:.0f}", "kN/m3"],
-            ["Finishes — Open Areas", f"{FINISHES_OPTIONS['1'][1]}", "kN/m2"],
-            ["Finishes — Residential", f"{FINISHES_OPTIONS['2'][1]}", "kN/m2"],
-            *live_rows,
-            ["Dead Load Factor (self-wt/partition)", f"{dc.factor_selfweight_partition}", "-"],
-            ["Dead Load Factor (finishes)", f"{dc.factor_finishes}", "-"],
-            ["Live Load Factor", f"{dc.factor_live}", "-"],
-            ["Concrete Characteristic Strength (fcu)", dc.concrete_grade, "-"],
-            ["Reinforcement Yield Strength (fy)", dc.steel_grade, "-"],
-            ["Exposure Conditions", dc.exposure_condition, "-"],
-            ["Fire Resistance", f"{dc.fire_resistance_hours}", "Hours"],
-            ["Concrete Cover", f"{dc.concrete_cover_mm:.0f}", "mm"],
+            ["Concrete density", f"{dc.concrete_density:.0f}", "kN/m³"],
+            ["Wall material density", f"{dc.wall_density:.0f}", "kN/m³"],
+            ["Finishes — " + FINISHES_OPTIONS['1'][0], f"{FINISHES_OPTIONS['1'][1]}", "kN/m²"],
+            ["Finishes — " + FINISHES_OPTIONS['2'][0], f"{FINISHES_OPTIONS['2'][1]}", "kN/m²"],
+            *[[f"Live load — {lb}", f"{v}", "kN/m²"] for lb, v in LIVE_LOAD_OPTIONS.values()],
+            ["Load factor: self-weight / partitions / wall", f"{dc.factor_selfweight_partition}", "-"],
+            ["Load factor: finishes", f"{dc.factor_finishes}", "-"],
+            ["Load factor: live", f"{dc.factor_live}", "-"],
         ]
-        table(headers, rows, [0.55, 0.25, 0.2], row_h=0.019,
-              ref="BS 6399-1:1996 Table 1\nEN 1990-1:2002 A1.2(B)\nBS 8110-1:1997 3.3 & 3.4",
-              output=f"Provide {dc.concrete_cover_mm:.0f}mm Cover")
+        table(["Parameter", "Value", "Unit"], rows, [0.62, 0.2, 0.18], row_h=0.019,
+              ref="BS 6399-1:1996\nTable 1\nEN 1990-1:2002\nTable A1.2(B)")
 
-        # ---- Per-span sections ----
-        labels = self.support_labels()
+        # ================= Beam layout =================
+        section_title("BEAM LAYOUT")
+        ensure_space(0.15)
+        ax = st["ax"]
+        cum = [0.0]
+        for s in self.spans:
+            cum.append(cum[-1] + s.length_m)
+        Ltot = cum[-1] or 1.0
+        xo = lambda m: X0 + 0.02 + (m / Ltot) * (X1 - X0 - 0.04)
+        yb = st["y"] - 0.085
+        ax.plot([xo(0), xo(Ltot)], [yb, yb], color='black', lw=2.2)
+        for k, lbl in enumerate(labels):
+            xk = xo(cum[k])
+            free = (k == 0 and self.spans[0].left_condition == "Cantilever") or \
+                   (k == len(labels) - 1 and self.spans[-1].right_condition == "Cantilever")
+            if free:
+                ax.plot(xk, yb, marker='o', ms=5, color='white', markeredgecolor='black', zorder=5)
+            else:
+                ax.add_patch(patches.Polygon([(xk - 0.007, yb - 0.014), (xk + 0.007, yb - 0.014), (xk, yb)],
+                                              closed=True, facecolor='white', edgecolor='black', zorder=5))
+            ax.text(xk, yb - 0.017, lbl, ha='center', va='top', fontsize=9, fontweight='bold')
         for i, s in enumerate(self.spans):
-            RL, RR = s.reactions()
-
-            # -- Load distribution to beam --
-            section_title(f"LOAD DISTRIBUTION TO BEAM — SPAN {i+1} ({labels[i]} -> {labels[i+1]})")
-            headers = ["Panel", "Panel Edge\non this Beam", "Factor", "Lx used (m)", "Dead nGk\n(kN/m)", "Live nQk\n(kN/m)"]
-            rows = []
-            for c in s.contributions:
-                p = self.panels[c.panel_id]
-                dead = [d for pid, edg, d, l in s.distribution_rows if pid == c.panel_id and edg == c.edge][0]
-                live = [l for pid, edg, d, l in s.distribution_rows if pid == c.panel_id and edg == c.edge][0]
-                crit = s.governing.get(c.edge, {})
-                tag = " *" if crit.get('panel_id') == c.panel_id else ""
-                factor = p.distribution_factor(c.edge)
-                rows.append([f"{c.panel_id}{tag}", c.edge, f"{factor:.3f}",
-                            f"{p.load_width_m():.3f}", f"{dead:.4f}", f"{live:.4f}"])
-            if not rows:
-                rows = [["-", "-", "-", "-", "0", "0"]]
-            table(headers, rows, [0.15, 0.20, 0.14, 0.13, 0.19, 0.19],
-                  ref="* = critical/governing panel\non that edge/side.\nFactor = BS 8110-1:1997\nTable 3.15 beta (or fixed\n0.5 ribbed / 1.0 cantilever).")
-            crit_panels = sorted({g['panel_id'] for g in s.governing.values()})
-            text_line(f"Take: " + ", ".join(f"Panel {pid}" for pid in crit_panels) if crit_panels
-                      else "Take: (no panels assigned)", fontsize=7.8)
-            text_line(f"Wall Loads Present: {'Yes' if s.wall_present else 'No'}"
-                      + (f"    Self-weight: {s.self_weight_kNm:.3f} kN/m" if s.self_weight_kNm else ""),
-                      fontsize=7.8)
-            side_note(output=f"nGk={s.udl_dead:.4f} kN/m\nnQk={s.udl_live:.4f} kN/m")
-            text_line(f"Total Uniformly Distributed Load (UDL):   "
-                      f"Gk = {s.udl_dead:.4f} kN/m     Qk = {s.udl_live:.4f} kN/m", bold=True)
-            y -= 0.008
-
-            # -- Support reactions --
-            section_title(f"SUPPORT REACTIONS — SPAN {i+1}")
-            headers = ["Load Type", "Dead nGk\n(kN/m or kN)", "Live nQk\n(kN/m or kN)", "Position\nfrom left",
-                       f"Dead {labels[i]}\n(kN)", f"Live {labels[i]}\n(kN)",
-                       f"Dead {labels[i+1]}\n(kN)", f"Live {labels[i+1]}\n(kN)"]
-            rows = [["udl", f"{s.udl_dead:.4f}", f"{s.udl_live:.4f}", f"{s.length_m:.2f}",
-                    f"{s.udl_dead*s.length_m/2:.4f}" if s.left_condition == "Pin" and s.right_condition == "Pin" else "-",
-                    f"{s.udl_live*s.length_m/2:.4f}" if s.left_condition == "Pin" and s.right_condition == "Pin" else "-",
-                    f"{s.udl_dead*s.length_m/2:.4f}" if s.left_condition == "Pin" and s.right_condition == "Pin" else "-",
-                    f"{s.udl_live*s.length_m/2:.4f}" if s.left_condition == "Pin" and s.right_condition == "Pin" else "-"]]
+            xm = xo((cum[i] + cum[i + 1]) / 2)
+            ids = ", ".join(dict.fromkeys(c.panel_id for c in s.contributions)) or "-"
+            ax.text(xm, yb + 0.014, ids, ha='center', va='bottom', fontsize=7.5, color=BLUE, fontweight='bold')
+            ax.text(xm, yb - 0.040, f"Span {i+1}: {s.length_m:.3f} m", ha='center', va='top', fontsize=7.6)
             for pl in s.point_loads:
-                left_d = pl.dead_kN * (s.length_m - pl.position_m) / s.length_m
-                left_l = pl.live_kN * (s.length_m - pl.position_m) / s.length_m
-                right_d = pl.dead_kN * pl.position_m / s.length_m
-                right_l = pl.live_kN * pl.position_m / s.length_m
-                rows.append([pl.label, f"{pl.dead_kN:.2f}", f"{pl.live_kN:.2f}", f"{pl.position_m:.2f}",
-                            f"{left_d:.4f}", f"{left_l:.4f}", f"{right_d:.4f}", f"{right_l:.4f}"])
-            rows.append(["Total", "", "", "", f"{RL['dead']:.2f}", f"{RL['live']:.2f}",
-                        f"{RR['dead']:.2f}", f"{RR['live']:.2f}"])
-            table(headers, rows, [0.09, 0.13, 0.13, 0.10, 0.14, 0.14, 0.14, 0.13], fontsize=6.9,
-                  output=f"R{labels[i]}: {RL['dead']:.1f}/{RL['live']:.1f}\n"
-                         f"R{labels[i+1]}: {RR['dead']:.1f}/{RR['live']:.1f} kN")
-            y -= 0.012
+                xp = xo(cum[i] + pl.position_m)
+                ax.annotate('', xy=(xp, yb + 0.003), xytext=(xp, yb + 0.062),
+                            arrowprops=dict(arrowstyle='-|>', lw=1.6, color='#8B1E2E', mutation_scale=11))
+                ax.text(xp, yb + 0.064, pl.label, ha='center', va='bottom', fontsize=7.2,
+                        color='#8B1E2E', fontweight='bold')
+        st["y"] = yb - 0.075
 
-        # ---- TOTAL SUPPORT REACTIONS ----
-        section_title("TOTAL SUPPORT REACTIONS")
+        # ================= SLAB LOADING (grouped) =================
+        section_title("SLAB LOADING")
+        groups = {}
+        for pid, pn in self.panels.items():
+            key = (pn.thickness_mm, pn.finishes_kNm2, pn.live_kNm2, pn.has_partition,
+                   (pn.partition_len_m, pn.partition_thk_m, pn.partition_ht_m, pn.ly_m, pn.lx_m)
+                   if pn.has_partition else None)
+            groups.setdefault(key, []).append(pid)
+        for key, ids in groups.items():
+            pn = self.panels[ids[0]]
+            heading("Panel" + ("s " if len(ids) > 1 else " ") + ", ".join(str(i) for i in ids))
+            sw, part = pn.self_weight_kNm2(dc), pn.partition_kNm2(dc)
+            G, Q = pn.dead_kNm2(dc), pn.live_kNm2_factored(dc)
+            line("Dead loads, Gk:", bold=True, ref="BS 6399-1:1996\nTable 1",
+                 out=("Panel" + ("s " if len(ids) > 1 else " ") + ", ".join(str(i) for i in ids)
+                      + f":\nnGk = {G:.2f} kN/m²\nnQk = {Q:.2f} kN/m²"))
+            line(f"Self weight = {pn.thickness_mm/1000:g} × {dc.concrete_density:g} = {sw:.2f} kN/m²", indent=0.06)
+            line(f"Finishes = {pn.finishes_kNm2:g} kN/m²", indent=0.06)
+            if pn.has_partition:
+                line(f"Partitions = ({pn.partition_len_m:g} × {pn.partition_thk_m:g} × {pn.partition_ht_m:g}"
+                     f" × {dc.wall_density:g}) / ({pn.ly_m:g} × {pn.lx_m:g}) = {part:.2f} kN/m²", indent=0.06)
+            else:
+                line("Partitions = 0 kN/m²", indent=0.06)
+            line(f"Live loads, Qk = {pn.live_kNm2:g} kN/m²", bold=True)
+            line("Factored loads:", bold=True, ref="EN 1990-1:2002\nTable A1.2(B)")
+            line(f"nGk = {dc.factor_selfweight_partition:g}({sw:.2f} + {part:.2f}) + "
+                 f"{dc.factor_finishes:g}({pn.finishes_kNm2:g}) = {G:.2f} kN/m²", indent=0.06)
+            line(f"nQk = {dc.factor_live:g} × {pn.live_kNm2:g} = {Q:.2f} kN/m²", indent=0.06)
+            gap(0.7)
+
+        # ================= WALL LOADING =================
+        any_wall = any(s.wall_present for s in self.spans)
+        if any_wall:
+            heading("Wall loading:")
+            wl = self.wall
+            line(f"Wall height = {wl.height_m:g} m,   thickness = {wl.thickness_m:g} m,   γ = {dc.wall_density:g} kN/m³",
+                 indent=0.06, ref="BS 6399-1:1996\nTable 1")
+            line(f"nGk = {dc.factor_selfweight_partition:g} × {wl.thickness_m:g} × {wl.height_m:g} × "
+                 f"{dc.wall_density:g} = {wl.factored_dead_kNm(dc):.2f} kN/m", indent=0.06,
+                 out=f"Wall loading:\nnGk = {wl.factored_dead_kNm(dc):.2f} kN/m")
+            gap(0.7)
+
+        # ================= PER-SPAN LOAD DISTRIBUTION =================
+        for i, s in enumerate(self.spans):
+            ensure_space(0.22)
+            section_title(f"SPAN {i+1}   ({labels[i]} → {labels[i+1]},  L = {s.length_m:.3f} m,  "
+                          f"{s.left_condition}/{s.right_condition})")
+            for c in s.contributions:
+                pn = self.panels[c.panel_id]
+                sketch_block(pn, pn.describe_bearing(c.edge),
+                             ref="BS 8110-1:1997\nTable 3.15" if pn.slab_type == "solid" else "")
+            if not s.contributions:
+                line("No panels bear on this span.")
+
+            # ---- dead loads ----
+            line("Dead loads:", bold=True)
+            gov_parts, gov_live_parts = [], []
+            for c in s.contributions:
+                pn = self.panels[c.panel_id]
+                f, w, G, Q = pn.distribution_factor(c.edge), pn.load_width_m(), pn.dead_kNm2(dc), pn.live_kNm2_factored(dc)
+                g = s.governing[c.edge]
+                many = len(g['all_candidates']) > 1
+                tag = ("   (critical)" if g['panel_id'] == c.panel_id else "   (not critical)") if many else ""
+                line(f"Panel {c.panel_id}:  {f:.3f} × {G:.2f} × {w:.3f} = {f*G*w:.2f} kN/m{tag}", indent=0.06)
+            for edge, g in s.governing.items():
+                gov_parts.append(f"{g['dead']:.2f}")
+                gov_live_parts.append(f"{g['live']:.2f}")
+            extras = []
+            if s.wall_present:
+                extras.append(f"{self.wall.factored_dead_kNm(dc):.2f}")
+                line(f"Wall loading = {self.wall.factored_dead_kNm(dc):.2f} kN/m", indent=0.06)
+            if s.self_weight_kNm:
+                extras.append(f"{s.self_weight_kNm:.2f}")
+                line(f"Element self-weight = {s.self_weight_kNm:.2f} kN/m", indent=0.06)
+            parts = gov_parts + extras
+            line(f"nGk = {' + '.join(parts) if parts else '0'} = {s.udl_dead:.2f} kN/m", bold=True, indent=0.06,
+                 out=f"Span {i+1}:\nnGk = {s.udl_dead:.2f} kN/m\nnQk = {s.udl_live:.2f} kN/m")
+            # ---- live loads ----
+            line("Live loads:", bold=True)
+            for c in s.contributions:
+                pn = self.panels[c.panel_id]
+                f, w, Q = pn.distribution_factor(c.edge), pn.load_width_m(), pn.live_kNm2_factored(dc)
+                g = s.governing[c.edge]
+                many = len(g['all_candidates']) > 1
+                tag = ("   (critical)" if g['panel_id'] == c.panel_id else "   (not critical)") if many else ""
+                line(f"Panel {c.panel_id}:  {f:.3f} × {Q:.2f} × {w:.3f} = {f*Q*w:.2f} kN/m{tag}", indent=0.06)
+            line(f"nQk = {' + '.join(gov_live_parts) if gov_live_parts else '0'} = {s.udl_live:.2f} kN/m",
+                 bold=True, indent=0.06)
+            # ---- point loads ----
+            for pl in s.point_loads:
+                line(f"Point load {pl.label}:  nGk = {pl.dead_kN:.2f} kN,  nQk = {pl.live_kN:.2f} kN  "
+                     f"at {pl.position_m:.3f} m from {labels[i]}", bold=True,
+                     out=f"Point load {pl.label}:\nnGk = {pl.dead_kN:.2f} kN\nnQk = {pl.live_kN:.2f} kN")
+            gap(0.8)
+
+        # ================= REACTIONS =================
+        section_title("SUPPORT REACTIONS")
         totals = self.support_reactions()
-        headers = ["Support", "Condition", "Dead nGk (kN)", "Live nQk (kN)", "Total (kN)"]
+        for k, lbl in enumerate(labels):
+            for kind, nm in (("dead", "nGk"), ("live", "nQk")):
+                terms = []
+                if k < len(self.spans):
+                    terms += self.spans[k].reaction_terms('L', kind)
+                if k > 0:
+                    terms += self.spans[k - 1].reaction_terms('R', kind)
+                total = sum(v for _, v in terms)
+                expr = " + ".join(e for e, _ in terms) if terms else "0"
+                out = ""
+                if kind == "dead":
+                    out = f"R{lbl}:\nnGk = {totals[lbl]['dead']:.2f} kN\nnQk = {totals[lbl]['live']:.2f} kN"
+                line(f"R{lbl}, {nm} = {expr} = {total:.2f} kN", indent=0.02, out=out)
+            gap(0.4)
+
+        # ================= TOTALS =================
+        section_title("TOTAL SUPPORT REACTIONS")
         rows = []
         for idx, lbl in enumerate(labels):
-            cond = self.support_condition_label(idx)
             d, l = totals[lbl]['dead'], totals[lbl]['live']
-            rows.append([lbl, cond, f"{d:.2f}", f"{l:.2f}", f"{d+l:.2f}"])
-        gtot_d = sum(v['dead'] for v in totals.values())
-        gtot_l = sum(v['live'] for v in totals.values())
-        rows.append(["Beam Total", "", f"{gtot_d:.4f}", f"{gtot_l:.4f}", f"{gtot_d+gtot_l:.4f}"])
-        table(headers, rows, [0.16, 0.28, 0.2, 0.18, 0.18],
-              ref="Note: shared/interior\nsupports combine\nreactions from both\nadjacent spans.")
+            rows.append([lbl, self.support_condition_label(idx), f"{d:.2f}", f"{l:.2f}", f"{d+l:.2f}"])
+        gd = sum(v['dead'] for v in totals.values()); gl = sum(v['live'] for v in totals.values())
+        rows.append(["Beam Total", "", f"{gd:.2f}", f"{gl:.2f}", f"{gd+gl:.2f}"])
+        table(["Support", "Condition", "Dead nGk (kN)", "Live nQk (kN)", "Total (kN)"], rows,
+              [0.16, 0.28, 0.2, 0.18, 0.18],
+              ref="Shared supports\ncombine reactions\nfrom both spans.")
 
-        # ---- Diagram page ----
-        fig2, ax2 = self.figure()
+        # ================= OUTPUT DIAGRAM =================
+        fig2, _ = self.figure()
         pages.append(fig2)
 
         with PdfPages(filename) as pdf:
-            for f in pages:
+            for n, f in enumerate(pages, 1):
+                if f is not fig2:
+                    f.axes[0].text(RIGHT, 0.02, f"Page {n} of {len(pages)}", fontsize=7,
+                                   color='#888888', ha='right')
                 pdf.savefig(f)
                 plt.close(f)
-
         return filename

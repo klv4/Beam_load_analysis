@@ -15,51 +15,12 @@ import matplotlib.patches as patches
 from beam_multi_span import (
     ProjectInfo, DesignCriteria, SlabPanel, WallLoad, PanelContribution, PointLoad,
     Span, BeamSystem, FINISHES_OPTIONS, LIVE_LOAD_OPTIONS, bs8110_classify_panel,
+    panel_sketch_figure,
 )
 
 st.set_page_config(page_title="Multi-Span Beam Load Analysis", layout="centered")
 st.title("Multi-span beam — load analysis")
 
-
-def draw_panel_sketch(ly, lx, edges, ly_edges, ref_edge, arrow=None):
-    """Live sketch of the panel. Orange edge = reference edge (the edge sitting on
-    the beam). Solid panels: thick navy = continuous, thin dashed grey = discontinuous.
-    `arrow` = ("double", (dx,dy)) for ribs or ("single", (dx,dy)) for a cantilever."""
-    fig, ax = plt.subplots(figsize=(3.4, 3.4))
-    ax.set_xlim(-0.35, 1.35)
-    ax.set_ylim(-0.35, 1.35)
-    ax.set_aspect('equal')
-    ax.axis('off')
-
-    def style(cont):
-        return dict(color='#1F4E78', lw=4.5, solid_capstyle='butt') if cont else \
-               dict(color='#AAAAAA', lw=1.3, linestyle=(0, (4, 3)))
-
-    seg = {'top': ([0, 1], [1, 1]), 'bottom': ([0, 1], [0, 0]),
-           'left': ([0, 0], [0, 1]), 'right': ([1, 1], [0, 1])}
-    for k, (xs, ys) in seg.items():
-        ax.plot(xs, ys, **style(edges[k] if edges else False))
-    xs, ys = seg[ref_edge]
-    ax.plot(xs, ys, color='#E07B00', lw=6, solid_capstyle='butt', zorder=5)
-    lab = {'top': (0.5, 0.93, 'center', 'top', 0), 'bottom': (0.5, 0.07, 'center', 'bottom', 0),
-           'left': (0.06, 0.5, 'left', 'center', 90), 'right': (0.94, 0.5, 'right', 'center', 90)}[ref_edge]
-    ax.text(lab[0], lab[1], "beam", ha=lab[2], va=lab[3], rotation=lab[4], fontsize=8, color='#E07B00')
-
-    if arrow:
-        kind, (dx, dy) = arrow
-        half = 0.3 if kind == "double" else 0.25
-        p0 = (0.5 - half * dx, 0.5 - half * dy)
-        p1 = (0.5 + half * dx, 0.5 + half * dy)
-        ax.annotate('', xy=p1, xytext=p0, zorder=6,
-                    arrowprops=dict(arrowstyle='<|-|>' if kind == "double" else '-|>',
-                                    lw=2.2, color='#8B1E2E', mutation_scale=16))
-
-    top_dim, side_dim = (ly, lx) if "top" in ly_edges else (lx, ly)
-    ax.text(0.5, 1.12, f"{'ly' if 'top' in ly_edges else 'lx'} = {top_dim:g} m",
-            ha='center', va='bottom', fontsize=9)
-    ax.text(1.12, 0.5, f"{'ly' if 'left' in ly_edges else 'lx'} = {side_dim:g} m",
-            ha='left', va='center', fontsize=9, rotation=90)
-    return fig
 
 dc = DesignCriteria()
 
@@ -185,17 +146,13 @@ for i in range(1, int(n_panels) + 1):
                         f"{edge_key.capitalize()} continuous ({dim} edge, {dim_val:g} m)",
                         value=True, key=f"e{edge_key}{i}")
             with ec2:
-                st.pyplot(draw_panel_sketch(ly, lx, edge_continuous, ly_edges, primary_edge), width='content')
+                st.pyplot(panel_sketch_figure(panel_obj), width='content')
             st.caption(f"BS 8110 panel type: **{bs8110_classify_panel(edge_continuous, list(ly_edges), list(lx_edges))}**"
                        + (f"  — *one-way: beta_vx taken at ly/lx = 2.0*" if spanning == "One-way" else ""))
         else:
-            vx, vy = panel_obj.arrow_vector() if slab_type == "cantilever" else \
-                ((1, 0) if panel_obj.arrow_axis() == "horizontal" else (0, 1))
             sk1, sk2 = st.columns([1, 1])
             with sk2:
-                st.pyplot(draw_panel_sketch(ly, lx, None, ly_edges, primary_edge,
-                                            arrow=("double" if slab_type == "ribbed" else "single", (vx, vy))),
-                          width='content')
+                st.pyplot(panel_sketch_figure(panel_obj), width='content')
             with sk1:
                 f_ = panel_obj.distribution_factor(primary_edge)
                 st.markdown(f"Factor = **{f_:.2f}**  \nLoad width lx = **{panel_obj.load_width_m():.3f} m**")
@@ -204,7 +161,7 @@ for i in range(1, int(n_panels) + 1):
                                if arrow_perpendicular else
                                "Ribs parallel to the beam: lx = rib load width entered above.")
                 else:
-                    st.caption("Cantilever perpendicular to the beam: factor 1.0, lx = projection length."
+                    st.caption("Cantilever loading perpendicular to the beam (arrow points toward it): factor 1.0, lx = projection length."
                                if arrow_perpendicular else
                                "Beam runs along the cantilever direction: factor 0.5, lx = shortest panel dimension.")
         panels[name] = panel_obj
