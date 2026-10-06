@@ -5,17 +5,14 @@ Interactive, step-by-step command-line wizard for beam_multi_span.py.
 
     1. Project information
     2. Number of spans, lengths, and end support conditions (Pin / Cantilever)
-    3. Slab panel properties
-    4. Design criteria & load selection (Finishes / Partitions / Live loads)
-    5. Slab loading calculation (automatic)
-    6. Wall loading (direct wall on beam) + partition toggle recap
-    7. Load distribution to spans (which panels touch which span; critical
-       panel identified automatically where more than one touches a side)
-    8. Point loads & self-weight per span
-    9. Support reactions (statics, honouring end conditions)
-    10. Tabulated output
-    11. Graphical output (PNG diagram)
-    12. PDF report
+    3. Slab panels & design criteria (finishes, partitions, live loads)
+    4. Slab loading calculation (automatic)
+    5. Wall loading (floor height - beam depth)
+    6. Load distribution to spans (critical panel identified automatically)
+    7. Point loads (with optional element self-weight) & self-weight per span
+    8. Results (reactions + tabulated output)
+    9. Graphical output (SVG diagram)
+    10. PDF calculation sheet
 
 Run:
     python beam_wizard.py
@@ -94,15 +91,19 @@ def run_wizard():
     # ---------------- STEP 1: project information ----------------
     print("\nSTEP 1 — Project information")
     project = ProjectInfo(
-        firm_name=ask_str("  Firm name", default="Horicon Engineering Solutions"),
-        address=ask_str("  Address", default=""),
+        firm_name=ask_str("  Firm name", default=ProjectInfo().firm_name),
+        address=ask_str("  Address", default=ProjectInfo().address),
+        tel=ask_str("  Tel", default=ProjectInfo().tel),
+        email=ask_str("  Email", default=ProjectInfo().email),
+        project_title=ask_str("  Project title"),
+        checked_by=ask_str("  Checked by"),
         job_no=ask_str("  Job No."),
         calc_sheet_no=ask_str("  Calculation Sheet No."),
         designer=ask_str("  Designer/Engineer"),
         date=ask_str("  Date"),
         revision=ask_str("  Revision", default="A"),
         element=ask_str("  Element (e.g. 'Second Floor Beam SF9')"),
-        beam_type=ask_str("  Beam type", default="Simply Supported"),
+        beam_type=ask_str("  Beam type (blank = automatic)", default=""),
         location=ask_str("  Location (e.g. 'Along Grid 3/A-C')"),
         material=ask_str("  Material / beam ID"),
     )
@@ -119,7 +120,7 @@ def run_wizard():
     end_cond = ask_condition("  Condition at the LAST support (end of last span)")
 
     # ---------------- STEP 3: slab panels ----------------
-    print("\nSTEP 3 — Slab panel properties")
+    print("\nSTEP 3 — Slab panels & design criteria")
     n_panels = ask_int("How many slab panels are there in total?", default=1)
     panels = {}
     used_names = set()
@@ -232,12 +233,12 @@ def run_wizard():
                   f"load width lx = {pn.load_width_m():.3f} m\n")
 
     # ---------------- STEP 5: slab loading (auto) ----------------
-    print("\nSTEP 5 — Slab loading calculation")
+    print("\nSTEP 4 — Slab loading calculation")
     for i, p in panels.items():
         print(f"  Panel {i}: Gk = {p.dead_kNm2(dc):.3f} kN/m²   Qk = {p.live_kNm2_factored(dc):.3f} kN/m²")
 
     # ---------------- STEP 6: wall loading ----------------
-    print("\nSTEP 6 — Wall loading")
+    print("\nSTEP 5 — Wall loading")
     wall_defined = ask_yesno("Is there direct wall loading on the beam anywhere?", "n")
     if wall_defined:
         wt = ask_float("  Wall thickness (m)", default=0.2)
@@ -259,7 +260,7 @@ def run_wizard():
     for i in range(n_spans):
         print(f"\n--- Span {i+1} (length {span_lengths[i]} m) ---")
 
-        print("STEP 7 — Load distribution: which panels touch this span?")
+        print("STEP 6 — Load distribution: which panels touch this span?")
         print(f"  Available panels: {', '.join(panels.keys())}")
         n_contrib = ask_int("  How many panel contributions on this span?", default=0)
         contributions = []
@@ -279,7 +280,7 @@ def run_wizard():
 
         wall_here = ask_yesno("  Is the wall present on THIS span?", "n") if wall_defined else False
 
-        print("STEP 8 — Point loads and self-weight on this span")
+        print("STEP 7 — Point loads and self-weight on this span")
         self_weight = ask_float("  Element self-weight (kN/m) — added automatically to Gk", default=0)
         n_pts = ask_int("  How many point loads on this span?", default=0)
         point_loads = []
@@ -288,7 +289,16 @@ def run_wizard():
             d = ask_float(f"    {label}: dead load Ngk (kN)", default=0)
             l = ask_float(f"    {label}: live load Nqk (kN)", default=0)
             x = ask_float(f"    {label}: position from left support (m)", default=0)
-            point_loads.append(PointLoad(label, d, l, x))
+            eb = eh = el = 0.0
+            if ask_yesno(f"    Add self-weight of the element (beam/column) to {label}?", "n"):
+                eb = ask_float("      Element width b (mm)", default=200) / 1000.0
+                eh = ask_float("      Element depth h (mm)", default=450) / 1000.0
+                el = ask_float("      Element length (m)", default=3)
+            pl = PointLoad(label, d, l, x, eb, eh, el, dc.concrete_density, dc.factor_selfweight_partition)
+            if pl.self_weight_kN:
+                print(f"      Self-weight = {dc.factor_selfweight_partition:g} x {eb:g} x {eh:g} x {el:g} x "
+                      f"{dc.concrete_density:g} = {pl.self_weight_kN:.2f} kN  ->  total Ngk = {pl.total_dead_kN:.2f} kN")
+            point_loads.append(pl)
 
         left_cond = start_cond if i == 0 else "Pin"
         right_cond = end_cond if i == n_spans - 1 else "Pin"
@@ -311,15 +321,15 @@ def run_wizard():
 
     # ---------------- STEP 9/10: compute + tabulate ----------------
     beam.compute_all()
-    print("\nSTEP 9/10 — Results")
+    print("\nSTEP 8 — Results")
     print(beam.tabulate())
 
     # ---------------- STEP 11: diagram ----------------
     diagram_path = beam.plot("beam_diagram.svg")
-    print(f"\nSTEP 11 — Diagram saved to: {diagram_path} (vector SVG — open in a browser or vector editor)")
+    print(f"\nSTEP 9 — Diagram saved to: {diagram_path} (vector SVG — open in a browser or vector editor)")
 
     # ---------------- STEP 12: PDF report ----------------
-    make_pdf = ask_yesno("\nSTEP 12 — Generate a PDF report?", "y")
+    make_pdf = ask_yesno("\nSTEP 10 — Generate a PDF report?", "y")
     if make_pdf:
         pdf_path = beam.generate_pdf("beam_report.pdf")
         print(f"  PDF report saved to: {pdf_path}")

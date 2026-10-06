@@ -26,6 +26,7 @@ Engineering model
 
 from dataclasses import dataclass, field
 import math
+import os
 import re
 from typing import List, Dict, Tuple, Optional
 import matplotlib
@@ -55,15 +56,20 @@ def sub(txt: str) -> str:
 # ============================================================
 @dataclass
 class ProjectInfo:
-    firm_name: str = "Horicon Engineering Solutions"
-    address: str = ""
+    firm_name: str = "INFRAS ENGINEERING SOLUTIONS"
+    address: str = "P.O Box 45297-00100 Nairobi"
+    tel: str = "+254 723703705"
+    email: str = "info@infrasengineering.com"
+    logo_path: str = ""            # blank -> logo.png in the same folder as this module
+    project_title: str = ""        # shown in the title block
+    checked_by: str = ""
     job_no: str = ""
     calc_sheet_no: str = ""
     designer: str = ""
     date: str = ""
     revision: str = ""
     element: str = ""              # e.g. "Second Floor Beam SF9"
-    beam_type: str = "Simply Supported"
+    beam_type: str = ""
     location: str = ""             # e.g. "Along Grid 3/A-C"
     material: str = ""             # e.g. "Beam 9"
 
@@ -490,9 +496,24 @@ class PanelContribution:
 @dataclass
 class PointLoad:
     label: str
-    dead_kN: float
+    dead_kN: float             # the Ngk value typed in (kN), WITHOUT element self-weight
     live_kN: float
     position_m: float          # measured from this span's LEFT support
+    # Optional element (beam / column) whose self-weight is added to dead_kN
+    elem_b_m: float = 0.0      # width
+    elem_h_m: float = 0.0      # depth
+    elem_len_m: float = 0.0    # length
+    density_kNm3: float = 24.0
+    sw_factor: float = 1.0
+
+    @property
+    def self_weight_kN(self) -> float:
+        return self.sw_factor * self.elem_b_m * self.elem_h_m * self.elem_len_m * self.density_kNm3
+
+    @property
+    def total_dead_kN(self) -> float:
+        """Typed Ngk + element self-weight — this is the value used in every calculation."""
+        return self.dead_kN + self.self_weight_kN
 
 
 # ============================================================
@@ -547,7 +568,7 @@ class Span:
         for kind 'dead' or 'live' — mirrors reactions() exactly."""
         L = self.length_m
         w = self.udl_dead if kind == "dead" else self.udl_live
-        loads = [(pl, pl.dead_kN if kind == "dead" else pl.live_kN) for pl in self.point_loads]
+        loads = [(pl, pl.total_dead_kN if kind == "dead" else pl.live_kN) for pl in self.point_loads]
         if self.left_condition == "Cantilever":
             full = (side == "R")
         elif self.right_condition == "Cantilever":
@@ -572,7 +593,7 @@ class Span:
         """STEP 9 — returns (R_left, R_right), each {'dead':.., 'live':..},
         honouring Pin / Cantilever end conditions."""
         L = self.length_m
-        total_dead = self.udl_dead * L + sum(p.dead_kN for p in self.point_loads)
+        total_dead = self.udl_dead * L + sum(p.total_dead_kN for p in self.point_loads)
         total_live = self.udl_live * L + sum(p.live_kN for p in self.point_loads)
 
         if self.left_condition == "Cantilever":
@@ -583,9 +604,9 @@ class Span:
         RL = dict(dead=self.udl_dead * L / 2, live=self.udl_live * L / 2)
         RR = dict(dead=self.udl_dead * L / 2, live=self.udl_live * L / 2)
         for p in self.point_loads:
-            RL['dead'] += p.dead_kN * (L - p.position_m) / L
+            RL['dead'] += p.total_dead_kN * (L - p.position_m) / L
             RL['live'] += p.live_kN * (L - p.position_m) / L
-            RR['dead'] += p.dead_kN * p.position_m / L
+            RR['dead'] += p.total_dead_kN * p.position_m / L
             RR['live'] += p.live_kN * p.position_m / L
         return RL, RR
 
@@ -674,7 +695,7 @@ class BeamSystem:
                             f"Gk={g['dead']:.4f} kN/m  Qk={g['live']:.4f} kN/m{note}")
             out.append(f"  UDL (total)  : Gk = {s.udl_dead:.3f} kN/m   Qk = {s.udl_live:.3f} kN/m")
             for p in s.point_loads:
-                out.append(f"  {p.label:<10}  : Gk = {p.dead_kN:.2f} kN   Qk = {p.live_kN:.2f} kN"
+                out.append(f"  {p.label:<10}  : Gk = {p.total_dead_kN:.2f} kN   Qk = {p.live_kN:.2f} kN"
                             f"   @ {p.position_m:.2f} m from {labels[i]}")
             out.append(f"  Reaction {labels[i]:<3}  : Gk = {RL['dead']:.3f} kN   Qk = {RL['live']:.3f} kN")
             out.append(f"  Reaction {labels[i+1]:<3}  : Gk = {RR['dead']:.3f} kN   Qk = {RR['live']:.3f} kN")
@@ -695,11 +716,20 @@ class BeamSystem:
 
     # -------------------- STEP 11: graphical output --------------------
     def figure(self):
-        """Builds and returns the matplotlib Figure/Axes for the beam diagram
-        (a live vector plot). Supports are small upward arrows; the reaction at each
-        support (R with the support letter as a subscript, nG_k and nQ_k) is written
-        directly beneath it. Dimension lines: one line (spans) when there are no point
-        loads, two tiers (point-load positions, then spans) when there are."""
+        """Standalone matplotlib Figure/Axes for the beam diagram (live vector plot)."""
+        Ltot = sum(s.length_m for s in self.spans)
+        W = max(7.0, Ltot * 1.7)
+        fig, ax = plt.subplots(figsize=(W, 6.6))
+        self._draw_diagram(ax, W, title=True)
+        fig.tight_layout()
+        return fig, ax
+
+    def _draw_diagram(self, ax, width_in, title=True):
+        """Draws the load & reaction diagram on `ax` (width_in = drawn width in inches).
+        Supports are small upward arrows with the reaction R (support letter as a
+        subscript), nG_k and nQ_k written directly beneath. Dimension lines: one line
+        (spans) when there are no point loads; two tiers (point-load positions, then
+        spans) when there are. UDL blocks have no arrows."""
         labels = self.support_labels()
         cum = [0.0]
         for s in self.spans:
@@ -715,8 +745,8 @@ class BeamSystem:
         block_h = [0.6 + 1.8 * (m / max_mag) for m in mags]
 
         min_span = min([s.length_m for s in self.spans] + [Ltot]) if n_spans else 1.0
-        W = max(7.0, Ltot * 1.7)
-        in_per_m = W / (Ltot + 1.6)
+        in_per_m = width_in / (Ltot + 1.6)
+        fscale = max(0.72, min(1.0, min_span * in_per_m / 1.3))
         fs_r = max(5.5, min(8.5, 8.5 * min_span * in_per_m / 1.35))
 
         ARROW_L = 0.5
@@ -725,7 +755,6 @@ class BeamSystem:
         y_dim2 = y_dim1 - 0.42
         y_last = y_dim2 if has_pl else y_dim1
 
-        fig, ax = plt.subplots(figsize=(W, 6.6))
         ax.set_xlim(-0.8, Ltot + 0.8)
         top = max(block_h) + (3.2 if has_pl else 1.2)
         ax.set_ylim(y_last - 0.5, top + 0.6)
@@ -760,20 +789,24 @@ class BeamSystem:
             h = block_h[i]
             ax.add_patch(patches.Rectangle((x0, BEAM_Y + BEAM_H / 2), x1 - x0, h,
                                             facecolor='#DCE8F5', edgecolor='#1F4E78', lw=1.3, zorder=2))
-            for xe in (x0, x1):
-                ax.annotate('', xy=(xe, h), xytext=(xe, BEAM_Y + BEAM_H / 2),
-                            arrowprops=dict(arrowstyle='-|>', lw=1.3, color='#1F4E78', mutation_scale=12))
-            ax.text((x0 + x1) / 2, h + 0.08,
+            # keep the UDL label clear of point-load arrows: use the widest free stretch
+            hw = 0.62 * fscale / in_per_m
+            cuts = [x0] + sorted(x0 + p.position_m for p in s.point_loads) + [x1]
+            xlab = (x0 + x1) / 2
+            if any(abs(c - xlab) < hw for c in cuts[1:-1]):
+                a_, b_ = max(zip(cuts[:-1], cuts[1:]), key=lambda t: t[1] - t[0])
+                xlab = (a_ + b_) / 2
+            ax.text(xlab, h + 0.08,
                     f"{sub('nGk')} = {s.udl_dead:.2f} kN/m\n{sub('nQk')} = {s.udl_live:.2f} kN/m",
-                    ha='center', va='bottom', fontsize=8.8, color='#1F4E78', fontweight='bold')
+                    ha='center', va='bottom', fontsize=8.8 * fscale, color='#1F4E78', fontweight='bold')
             heights = [1.15, 1.7, 2.25, 2.8]
             for j, p in enumerate(s.point_loads):
                 xp = x0 + p.position_m
                 ph = h + heights[j % len(heights)]
                 ax.annotate('', xy=(xp, BEAM_Y + BEAM_H / 2 + 0.02), xytext=(xp, ph),
                             arrowprops=dict(arrowstyle='-|>', lw=2.1, color='#8B1E2E', mutation_scale=16))
-                ax.text(xp, ph + 0.06, f"{p.label}: {sub('Gk')}={p.dead_kN:.1f} {sub('Qk')}={p.live_kN:.1f} kN",
-                        ha='center', va='bottom', fontsize=7.6, color='#8B1E2E', fontweight='bold')
+                ax.text(xp, ph + 0.06, f"{p.label}: {sub('Gk')}={p.total_dead_kN:.1f} {sub('Qk')}={p.live_kN:.1f} kN",
+                        ha='center', va='bottom', fontsize=7.6 * fscale, color='#8B1E2E', fontweight='bold')
 
         # ---- dimension lines ----
         def dim_line(x0, x1, y, text, color='#333333'):
@@ -781,7 +814,7 @@ class BeamSystem:
                         arrowprops=dict(arrowstyle='<->', lw=0.8, color=color))
             ax.plot([x0, x0], [y - 0.07, y + 0.07], color=color, lw=0.8)
             ax.plot([x1, x1], [y - 0.07, y + 0.07], color=color, lw=0.8)
-            ax.text((x0 + x1) / 2, y - 0.1, text, ha='center', va='top', fontsize=7.6, color=color)
+            ax.text((x0 + x1) / 2, y - 0.1, text, ha='center', va='top', fontsize=7.6 * fscale, color=color)
 
         if has_pl:
             # Tier 1: positions of the point loads measured from the supports
@@ -797,9 +830,9 @@ class BeamSystem:
             for i, s in enumerate(self.spans):
                 dim_line(cum[i], cum[i + 1], y_dim1, f"Span {i+1} = {s.length_m:.2f} m", color='#1F4E78')
 
-        ax.set_title("Beam — Load & Reaction Diagram", fontsize=14, fontweight='bold', pad=14)
-        fig.tight_layout()
-        return fig, ax
+        if title:
+            ax.set_title("Beam — Load & Reaction Diagram", fontsize=14, fontweight='bold', pad=14)
+
 
     def plot(self, filename: str = "beam_diagram.svg") -> str:
         """Saves the diagram to a file. Use an .svg (default) or .pdf extension
@@ -823,7 +856,7 @@ class BeamSystem:
         LEFT, RIGHT = 0.05, 0.95
         REF_W, OUT_W = 0.11, 0.14
         X0, X1 = LEFT + REF_W, RIGHT - OUT_W
-        TOP, BOTTOM = 0.955, 0.05
+        TOP, BOTTOM = 0.878, 0.05
         STEP = 0.0165
         PAGE_W_IN, PAGE_H_IN = 9.0, 12.4
         labels = self.support_labels()
@@ -831,15 +864,66 @@ class BeamSystem:
         pages = []
         st = {"fig": None, "ax": None, "y": TOP}
 
+        # ---- title block geometry (drawn at the top of EVERY page) ----
+        ROWS = [0.986, 0.958, 0.934, 0.910, 0.890]
+        XL = LEFT + 0.22
+        XA, XB = X0 - 0.008, X1 + 0.004
+        logo_img = None
+        try:
+            logo_path = p.logo_path or os.path.join(os.path.dirname(os.path.abspath(__file__)), "logo.png")
+            logo_img = plt.imread(logo_path)
+        except Exception:
+            logo_img = None
+
         def new_page():
             fig = plt.figure(figsize=(PAGE_W_IN, PAGE_H_IN))
             ax = fig.add_axes([0, 0, 1, 1])
             ax.axis('off'); ax.set_xlim(0, 1); ax.set_ylim(0, 1); ax.set_autoscale_on(False)
-            ax.text(LEFT, 0.985, "DESIGN REF", fontsize=7, fontweight='bold', color='#888888')
-            ax.text(X1 + 0.01, 0.985, "OUTPUT", fontsize=7, fontweight='bold', color='#888888')
-            ax.text(0.5, 0.985, f"{p.job_no}   |   {p.element}   |   {p.date}", fontsize=7,
-                    color='#888888', ha='center')
-            ax.plot([0, 1], [0.978, 0.978], color='#CCCCCC', lw=0.6)
+
+            def box(x0, y0, x1, y1):
+                ax.add_patch(patches.Rectangle((x0, y0), x1 - x0, y1 - y0, facecolor='none',
+                                                edgecolor='black', lw=0.9, zorder=3))
+
+            def cell(x0, y0, x1, y1, label, value, vfs=8, bold=True):
+                box(x0, y0, x1, y1)
+                ax.text(x0 + 0.004, y1 - 0.003, label, fontsize=5.8, fontweight='bold', color='#444444', va='top')
+                ax.text((x0 + x1) / 2, y0 + (y1 - y0) * 0.36, value, fontsize=vfs, ha='center', va='center',
+                        fontweight='bold' if bold else 'normal')
+
+            # logo cell
+            box(LEFT, ROWS[3], XL, ROWS[0])
+            if logo_img is not None:
+                ww = 0.165
+                hh = ww * PAGE_W_IN / PAGE_H_IN * logo_img.shape[0] / logo_img.shape[1]
+                iax = ax.inset_axes([LEFT + 0.0275, ROWS[0] - 0.004 - hh, ww, hh])
+                iax.imshow(logo_img); iax.axis('off')
+                ty = ROWS[0] - 0.004 - hh - 0.003
+            else:
+                ax.text((LEFT + XL) / 2, ROWS[0] - 0.006, p.firm_name, fontsize=8, fontweight='bold',
+                        ha='center', va='top')
+                ty = ROWS[0] - 0.024
+            for k, t in enumerate([p.address, f"Tel: {p.tel}" if p.tel else "",
+                                   f"Email: {p.email}" if p.email else ""]):
+                if t:
+                    ax.text((LEFT + XL) / 2, ty - k * 0.0085, t, fontsize=5.2, ha='center', va='top')
+            # title rows
+            cell(XL, ROWS[1], 0.78, ROWS[0], "Project Title:", p.project_title or p.element, vfs=10)
+            cell(0.78, ROWS[1], RIGHT, ROWS[0], "Job No:", p.job_no, vfs=8.5)
+            cell(XL, ROWS[2], 0.62, ROWS[1], "By:", p.designer, vfs=8.5, bold=False)
+            cell(0.62, ROWS[2], RIGHT, ROWS[1], "Checked by:", p.checked_by, vfs=8.5, bold=False)
+            cell(XL, ROWS[3], 0.62, ROWS[2], "Calc:", (p.element or "Beam load analysis").upper(), vfs=8)
+            cell(0.62, ROWS[3], 0.78, ROWS[2], "Date:", p.date, vfs=8, bold=False)
+            cell(0.78, ROWS[3], RIGHT, ROWS[2], "Sheet No:", "", vfs=8)
+            # column headings
+            for (xa, xb, t) in ((LEFT, XA, "References"), (XA, XB, "Calculation"), (XB, RIGHT, "Output")):
+                box(xa, ROWS[4], xb, ROWS[3])
+                ax.text((xa + xb) / 2, (ROWS[3] + ROWS[4]) / 2, t, fontsize=8, fontweight='bold',
+                        ha='center', va='center')
+            # calculation area: outer border + column rules
+            ax.add_patch(patches.Rectangle((LEFT, 0.04), RIGHT - LEFT, ROWS[4] - 0.04, facecolor='none',
+                                            edgecolor='black', lw=0.9, zorder=3))
+            ax.plot([XA, XA], [0.04, ROWS[4]], color='black', lw=0.7, zorder=3)
+            ax.plot([XB, XB], [0.04, ROWS[4]], color='black', lw=0.7, zorder=3)
             st.update(fig=fig, ax=ax, y=TOP, ref_y=2.0, out_y=2.0)
             pages.append(fig)
 
@@ -857,9 +941,11 @@ class BeamSystem:
             ref, out = sub(ref), sub(out)
             if ref:
                 yr = min(y, st["ref_y"])
-                ax.text(LEFT, yr, ref, fontsize=6.8, color='#666666', style='italic', va='top')
+                ax.text(LEFT + 0.004, yr, ref, fontsize=6.8, color='#666666', style='italic', va='top')
                 st["ref_y"] = yr - (ref.count("\n") + 1) * 0.0125 - 0.004
             if out:
+                out = "\n".join(w for ln in out.split("\n")
+                                for w in (textwrap.wrap(ln, 19, break_long_words=False) or [""]))
                 yo = min(y, st["out_y"])
                 ax.text(X1 + 0.01, yo, out, fontsize=7.6, color=BLUE, fontweight='bold', va='top')
                 st["out_y"] = yo - (out.count("\n") + 1) * 0.0135 - 0.004
@@ -894,7 +980,7 @@ class BeamSystem:
             st["y"] = min(st["y"], st["out_y"], st["ref_y"])   # clear any tall side note first
             ensure_space(0.06)
             ax = st["ax"]
-            ax.add_patch(patches.Rectangle((0, st["y"] - 0.022), 1, 0.028, facecolor=BLUE,
+            ax.add_patch(patches.Rectangle((LEFT, st["y"] - 0.022), RIGHT - LEFT, 0.028, facecolor=BLUE,
                                             edgecolor='none', zorder=1))
             ax.text(0.5, st["y"] - 0.008, text, fontsize=10.5, fontweight='bold', color='white',
                     ha='center', va='center', zorder=2)
@@ -948,18 +1034,12 @@ class BeamSystem:
 
         new_page()
 
-        # ================= Project header =================
-        ax = st["ax"]
-        ax.text(LEFT, st["y"], p.firm_name, fontsize=16, fontweight='bold')
-        st["y"] -= 0.026
-        ax.text(LEFT, st["y"], p.address, fontsize=8.5)
-        st["y"] -= 0.035
-        table([""] * 6, [
-            ["Job No.", p.job_no, "Designer", p.designer, "Date", p.date],
-            ["Element", p.element, "", "", "Material", p.material],
-            ["Type", p.beam_type, "Spans", str(len(self.spans)), "Revision", p.revision],
-            ["Location", p.location, "Calc. Sheet No.", p.calc_sheet_no, "", ""],
-        ], [0.13, 0.22, 0.13, 0.19, 0.11, 0.22], row_h=0.02, fontsize=7.6)
+        # ================= Project details (title block is on every page) =================
+        nsp = len(self.spans)
+        btype = p.beam_type or ("Continuous beam" if nsp > 1 else "Single-span beam")
+        table(["Element", "Beam type", "Spans", "Location", "Material / ID", "Revision"],
+              [[p.element, btype, str(nsp), p.location, p.material, p.revision]],
+              [0.22, 0.17, 0.08, 0.2, 0.18, 0.15], row_h=0.021, fontsize=7.3)
 
         # ================= DESIGN CRITERIA (first) =================
         section_title("DESIGN CRITERIA & MATERIALS")
@@ -1116,9 +1196,15 @@ class BeamSystem:
                  bold=True, indent=0.06)
             # ---- point loads ----
             for pl in s.point_loads:
-                line(f"Point load {pl.label}:  nGk = {pl.dead_kN:.2f} kN,  nQk = {pl.live_kN:.2f} kN  "
+                if pl.self_weight_kN:
+                    line(f"Point load {pl.label}: self-weight of element = {pl.sw_factor:g} × "
+                         f"{pl.elem_b_m:g} × {pl.elem_h_m:g} × {pl.elem_len_m:g} × {pl.density_kNm3:g} "
+                         f"= {pl.self_weight_kN:.2f} kN")
+                    line(f"nGk = {pl.dead_kN:.2f} + {pl.self_weight_kN:.2f} = {pl.total_dead_kN:.2f} kN",
+                         indent=0.06)
+                line(f"Point load {pl.label}:  nGk = {pl.total_dead_kN:.2f} kN,  nQk = {pl.live_kN:.2f} kN  "
                      f"at {pl.position_m:.3f} m from {labels[i]}", bold=True,
-                     out=f"Point load {pl.label}:\nnGk = {pl.dead_kN:.2f} kN\nnQk = {pl.live_kN:.2f} kN")
+                     out=f"Point load {pl.label}:\nnGk = {pl.total_dead_kN:.2f} kN\nnQk = {pl.live_kN:.2f} kN")
             gap(0.8)
 
         # ================= REACTIONS =================
@@ -1151,15 +1237,22 @@ class BeamSystem:
               [0.16, 0.28, 0.2, 0.18, 0.18],
               ref="Shared supports\ncombine reactions\nfrom both spans.")
 
-        # ================= OUTPUT DIAGRAM =================
-        fig2, _ = self.figure()
-        pages.append(fig2)
+        # ================= OUTPUT DIAGRAM (inside the same title-block page layout) =================
+        DH = 5.2 / PAGE_H_IN
+        ensure_space(DH + 0.07)
+        section_title("OUTPUT — LOAD & REACTION DIAGRAM")
+        dw = RIGHT - LEFT - 0.02
+        st["ax"].add_patch(patches.Rectangle((LEFT + 0.001, st["y"] - DH), RIGHT - LEFT - 0.002, DH,
+                                              facecolor='white', edgecolor='none', zorder=4))
+        dax = st["ax"].inset_axes([LEFT + 0.01, st["y"] - DH, dw, DH])
+        dax.set_zorder(5)
+        self._draw_diagram(dax, dw * PAGE_W_IN, title=False)
+        st["y"] -= DH
 
         with PdfPages(filename) as pdf:
             for n, f in enumerate(pages, 1):
-                if f is not fig2:
-                    f.axes[0].text(RIGHT, 0.02, f"Page {n} of {len(pages)}", fontsize=7,
-                                   color='#888888', ha='right')
+                f.axes[0].text((0.78 + RIGHT) / 2, ROWS[3] + 0.0075, f"{n} of {len(pages)}", fontsize=8.5,
+                               fontweight='bold', ha='center', va='center')
                 pdf.savefig(f)
                 plt.close(f)
         return filename

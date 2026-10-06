@@ -27,15 +27,22 @@ dc = DesignCriteria()
 # ---------------- Step 1: project information ----------------
 st.header("1. Project information")
 c1, c2 = st.columns(2)
+_d = ProjectInfo()
 project = ProjectInfo(
-    firm_name=c1.text_input("Firm name", value="Horicon Engineering Solutions"),
+    firm_name=c1.text_input("Firm name", value=_d.firm_name),
+    address=c2.text_input("Address", value=_d.address),
+    tel=c1.text_input("Tel", value=_d.tel),
+    email=c2.text_input("Email", value=_d.email),
+    project_title=c1.text_input("Project title"),
     job_no=c2.text_input("Job No."),
-    designer=c1.text_input("Designer/Engineer"),
-    date=c2.text_input("Date"),
-    element=c1.text_input("Element (e.g. 'Second Floor Beam SF9')"),
+    designer=c1.text_input("Designed by"),
+    checked_by=c2.text_input("Checked by"),
+    date=c1.text_input("Date"),
     revision=c2.text_input("Revision", value="A"),
-    location=c1.text_input("Location"),
-    material=c2.text_input("Material / beam ID"),
+    element=c1.text_input("Element (e.g. 'Second Floor Beam SF9')"),
+    location=c2.text_input("Location"),
+    material=c1.text_input("Material / beam ID"),
+    calc_sheet_no=c2.text_input("Calculation sheet No."),
 )
 
 # ---------------- Step 2: spans ----------------
@@ -56,7 +63,7 @@ end_cond = c2.selectbox("Condition at LAST support (end of last span)", ["Pin", 
 st.caption("Interior/shared supports are always pinned and continuous.")
 
 # ---------------- Step 3 & 4: slab panels ----------------
-st.header("3-4. Slab panels & design criteria")
+st.header("3. Slab panels & design criteria")
 n_panels = st.number_input("Number of slab panels", min_value=1, value=3, step=1)
 panels = {}
 fin_labels = {k: v[0] for k, v in FINISHES_OPTIONS.items()}
@@ -175,7 +182,7 @@ for i in range(1, int(n_panels) + 1):
                    f"  (Step 5: calculated automatically)")
 
 # ---------------- Step 6: wall ----------------
-st.header("6. Wall loading")
+st.header("4. Wall loading")
 wall_defined = st.checkbox("Is there direct wall loading on the beam anywhere?")
 if wall_defined:
     c1, c2, c3 = st.columns(3)
@@ -192,7 +199,7 @@ beam = BeamSystem(dc, panels, wall, project)
 labels = [chr(65 + i) for i in range(int(n_spans) + 1)]
 
 # ---------------- Step 7 & 8: per-span distribution + point loads ----------------
-st.header("7-8. Load distribution, self-weight and point loads per span")
+st.header("5. Load distribution, self-weight and point loads per span")
 for i in range(int(n_spans)):
     with st.expander(f"Span {i+1}  ({labels[i]} -> {labels[i+1]}, {lengths[i]} m)", expanded=(i == 0)):
         st.subheader("Panel contributions")
@@ -224,10 +231,21 @@ for i in range(int(n_spans)):
         for j in range(int(n_p)):
             c1, c2, c3, c4 = st.columns(4)
             label = c1.text_input("Label", value=f"P{j+1}", key=f"s{i}p{j}lbl")
-            d = c2.number_input("Ngk (kN)", value=0.0, step=0.5, key=f"s{i}p{j}d")
-            l = c3.number_input("Nqk (kN)", value=0.0, step=0.5, key=f"s{i}p{j}l")
+            d = c2.number_input("Ngₖ (kN)", value=0.0, step=0.5, key=f"s{i}p{j}d")
+            l = c3.number_input("Nqₖ (kN)", value=0.0, step=0.5, key=f"s{i}p{j}l")
             x = c4.number_input("Position (m)", value=0.0, step=0.1, key=f"s{i}p{j}x")
-            point_loads.append(PointLoad(label, d, l, x))
+            eb = eh = el = 0.0
+            if st.checkbox(f"Add self-weight of the element (beam / column) to {label}", key=f"s{i}p{j}sw"):
+                e1, e2, e3 = st.columns(3)
+                eb = e1.number_input("Width b (mm)", value=200.0, step=25.0, key=f"s{i}p{j}eb") / 1000.0
+                eh = e2.number_input("Depth h (mm)", value=450.0, step=25.0, key=f"s{i}p{j}eh") / 1000.0
+                el = e3.number_input("Length (m)", value=3.0, step=0.1, key=f"s{i}p{j}el")
+            pl = PointLoad(label, d, l, x, eb, eh, el, dc.concrete_density, dc.factor_selfweight_partition)
+            if pl.self_weight_kN:
+                st.caption(f"Self-weight = {dc.factor_selfweight_partition:g} × {eb:g} × {eh:g} × {el:g} × "
+                           f"{dc.concrete_density:g} = {pl.self_weight_kN:.2f} kN   →   "
+                           f"total Ngₖ = {d:g} + {pl.self_weight_kN:.2f} = **{pl.total_dead_kN:.2f} kN**")
+            point_loads.append(pl)
 
         left_cond = start_cond if i == 0 else "Pin"
         right_cond = end_cond if i == int(n_spans) - 1 else "Pin"
@@ -238,7 +256,7 @@ for i in range(int(n_spans)):
 
 # ---------------- Step 9 & 10: compute + tabulate ----------------
 beam.compute_all()
-st.header("9-10. Results")
+st.header("6. Results")
 
 for s in beam.spans:
     for pos, g in s.governing.items():
@@ -248,13 +266,23 @@ for s in beam.spans:
                        f"panel(s) {', '.join(str(o[0]) for o in others)} "
                        f"(Gₖ={g['dead']:.3f} kN/m)")
 
+span_rows = []
 for i, s in enumerate(beam.spans):
     RL, RR = s.reactions()
-    st.subheader(f"Span {i+1}")
-    c1, c2, c3 = st.columns(3)
-    c1.metric("UDL (Gₖ / Qₖ)", f"{s.udl_dead:.2f} / {s.udl_live:.2f} kN/m")
-    c2.metric(f"Reaction {labels[i]}", f"{RL['dead']:.2f} / {RL['live']:.2f} kN")
-    c3.metric(f"Reaction {labels[i+1]}", f"{RR['dead']:.2f} / {RR['live']:.2f} kN")
+    span_rows.append({
+        "Span": f"{i+1}  ({labels[i]} → {labels[i+1]})",
+        "L (m)": round(s.length_m, 3),
+        "UDL Gₖ (kN/m)": round(s.udl_dead, 2),
+        "UDL Qₖ (kN/m)": round(s.udl_live, 2),
+        "Left support": labels[i],
+        "Gₖ left (kN)": round(RL['dead'], 2),
+        "Qₖ left (kN)": round(RL['live'], 2),
+        "Right support": labels[i + 1],
+        "Gₖ right (kN)": round(RR['dead'], 2),
+        "Qₖ right (kN)": round(RR['live'], 2),
+    })
+st.subheader("Span loads and reactions")
+st.table(span_rows)
 
 st.subheader("Total support reactions")
 totals = beam.support_reactions()
@@ -264,7 +292,7 @@ rows = [{"Support": lbl, "Gₖ (kN)": round(totals[lbl]['dead'], 3),
 st.table(rows)
 
 # ---------------- Step 11: diagram ----------------
-st.header("11. Diagram")
+st.header("7. Diagram")
 fig, _ = beam.figure()
 st.pyplot(fig, width='stretch')
 
@@ -272,7 +300,7 @@ with st.expander("Full text summary"):
     st.code(beam.tabulate())
 
 # ---------------- Step 12: PDF report ----------------
-st.header("12. PDF report")
+st.header("8. PDF report")
 if st.button("Generate PDF report"):
     pdf_path = beam.generate_pdf("beam_report.pdf")
     with open(pdf_path, "rb") as f:
