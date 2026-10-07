@@ -756,8 +756,11 @@ class BeamSystem:
         y_last = y_dim2 if has_pl else y_dim1
 
         ax.set_xlim(-0.8, Ltot + 0.8)
-        top = max(block_h) + (3.2 if has_pl else 1.2)
-        ax.set_ylim(y_last - 0.5, top + 0.6)
+        hs = [1.15, 1.7, 2.25, 2.8]
+        top = max([block_h[i] + (max(hs[j % 4] for j in range(len(s.point_loads))) + 0.8
+                                 if s.point_loads else 0.9)
+                   for i, s in enumerate(self.spans)] + [1.5])
+        ax.set_ylim(y_last - 0.4, top + 0.3)
         ax.axis('off')
 
         BEAM_Y, BEAM_H = 0, max(0.012 * Ltot, 0.025)
@@ -875,7 +878,7 @@ class BeamSystem:
         except Exception:
             logo_img = None
 
-        def new_page():
+        def new_page(columns=True):
             fig = plt.figure(figsize=(PAGE_W_IN, PAGE_H_IN))
             ax = fig.add_axes([0, 0, 1, 1])
             ax.axis('off'); ax.set_xlim(0, 1); ax.set_ylim(0, 1); ax.set_autoscale_on(False)
@@ -914,16 +917,21 @@ class BeamSystem:
             cell(XL, ROWS[3], 0.62, ROWS[2], "Calc:", (p.element or "Beam load analysis").upper(), vfs=8)
             cell(0.62, ROWS[3], 0.78, ROWS[2], "Date:", p.date, vfs=8, bold=False)
             cell(0.78, ROWS[3], RIGHT, ROWS[2], "Sheet No:", "", vfs=8)
-            # column headings
-            for (xa, xb, t) in ((LEFT, XA, "References"), (XA, XB, "Calculation"), (XB, RIGHT, "Output")):
-                box(xa, ROWS[4], xb, ROWS[3])
-                ax.text((xa + xb) / 2, (ROWS[3] + ROWS[4]) / 2, t, fontsize=8, fontweight='bold',
-                        ha='center', va='center')
-            # calculation area: outer border + column rules
-            ax.add_patch(patches.Rectangle((LEFT, 0.04), RIGHT - LEFT, ROWS[4] - 0.04, facecolor='none',
-                                            edgecolor='black', lw=0.9, zorder=3))
-            ax.plot([XA, XA], [0.04, ROWS[4]], color='black', lw=0.7, zorder=3)
-            ax.plot([XB, XB], [0.04, ROWS[4]], color='black', lw=0.7, zorder=3)
+            if columns:
+                # column headings
+                for (xa, xb, t) in ((LEFT, XA, "References"), (XA, XB, "Calculation"), (XB, RIGHT, "Output")):
+                    box(xa, ROWS[4], xb, ROWS[3])
+                    ax.text((xa + xb) / 2, (ROWS[3] + ROWS[4]) / 2, t, fontsize=8, fontweight='bold',
+                            ha='center', va='center')
+                # calculation area: outer border + column rules
+                ax.add_patch(patches.Rectangle((LEFT, 0.04), RIGHT - LEFT, ROWS[4] - 0.04, facecolor='none',
+                                                edgecolor='black', lw=0.9, zorder=3))
+                ax.plot([XA, XA], [0.04, ROWS[4]], color='black', lw=0.7, zorder=3)
+                ax.plot([XB, XB], [0.04, ROWS[4]], color='black', lw=0.7, zorder=3)
+            else:
+                # plain page (output diagram): outer border only, no inner rules or column headings
+                ax.add_patch(patches.Rectangle((LEFT, 0.04), RIGHT - LEFT, ROWS[3] - 0.04, facecolor='none',
+                                                edgecolor='black', lw=0.9, zorder=3))
             st.update(fig=fig, ax=ax, y=TOP, ref_y=2.0, out_y=2.0)
             pages.append(fig)
 
@@ -944,8 +952,11 @@ class BeamSystem:
                 ax.text(LEFT + 0.004, yr, ref, fontsize=6.8, color='#666666', style='italic', va='top')
                 st["ref_y"] = yr - (ref.count("\n") + 1) * 0.0125 - 0.004
             if out:
-                out = "\n".join(w for ln in out.split("\n")
-                                for w in (textwrap.wrap(ln, 19, break_long_words=False) or [""]))
+                def _rl(t):   # rendered length: a $...$ subscript group draws as ~1 character
+                    return len(re.sub(r'\$[^$]*\$', 'X', t))
+                out = "\n".join(
+                    w for ln in out.split("\n")
+                    for w in ([ln] if _rl(ln) <= 21 else (textwrap.wrap(ln, 24, break_long_words=False) or [""])))
                 yo = min(y, st["out_y"])
                 ax.text(X1 + 0.01, yo, out, fontsize=7.6, color=BLUE, fontweight='bold', va='top')
                 st["out_y"] = yo - (out.count("\n") + 1) * 0.0135 - 0.004
@@ -1067,11 +1078,12 @@ class BeamSystem:
 
         # ================= Beam layout =================
         section_title("BEAM LAYOUT")
-        ensure_space(0.15)
+        has_pl = any(sp.point_loads for sp in self.spans)
+        ensure_space(0.20)
         ax = st["ax"]
         cum = [0.0]
-        for s in self.spans:
-            cum.append(cum[-1] + s.length_m)
+        for sp in self.spans:
+            cum.append(cum[-1] + sp.length_m)
         Ltot = cum[-1] or 1.0
         xo = lambda m: X0 + 0.02 + (m / Ltot) * (X1 - X0 - 0.04)
         yb = st["y"] - 0.085
@@ -1085,19 +1097,52 @@ class BeamSystem:
             else:
                 ax.add_patch(patches.Polygon([(xk - 0.007, yb - 0.014), (xk + 0.007, yb - 0.014), (xk, yb)],
                                               closed=True, facecolor='white', edgecolor='black', zorder=5))
-            ax.text(xk, yb - 0.017, lbl, ha='center', va='top', fontsize=9, fontweight='bold')
-        for i, s in enumerate(self.spans):
+            ax.text(xk, yb - 0.016, lbl, ha='center', va='top', fontsize=9, fontweight='bold')
+        for i, sp in enumerate(self.spans):
             xm = xo((cum[i] + cum[i + 1]) / 2)
-            ids = ", ".join(dict.fromkeys(c.panel_id for c in s.contributions)) or "-"
-            ax.text(xm, yb + 0.014, ids, ha='center', va='bottom', fontsize=7.5, color=BLUE, fontweight='bold')
-            ax.text(xm, yb - 0.040, f"Span {i+1}: {s.length_m:.3f} m", ha='center', va='top', fontsize=7.6)
-            for pl in s.point_loads:
+            # panel whose bottom/right edge is on the beam lies ABOVE / LEFT of it -> number on top;
+            # panel whose top/left edge is on the beam lies BELOW / RIGHT of it -> number just under the beam line
+            top_ids = list(dict.fromkeys(c.panel_id for c in sp.contributions if c.edge in ("bottom", "right")))
+            bot_ids = list(dict.fromkeys(c.panel_id for c in sp.contributions if c.edge in ("top", "left")))
+            cuts = [xo(cum[i])] + sorted(xo(cum[i] + pl.position_m) for pl in sp.point_loads) + [xo(cum[i + 1])]
+            xt = xm
+            if any(abs(c_ - xm) < 0.035 for c_ in cuts[1:-1]):
+                a_, b_ = max(zip(cuts[:-1], cuts[1:]), key=lambda t_: t_[1] - t_[0])
+                xt = (a_ + b_) / 2
+            if top_ids:
+                ax.text(xt, yb + 0.014, ", ".join(top_ids), ha='center', va='bottom', fontsize=7.5,
+                        color=BLUE, fontweight='bold')
+            if bot_ids:
+                ax.text(xm, yb - 0.006, ", ".join(bot_ids), ha='center', va='top', fontsize=7.5,
+                        color=BLUE, fontweight='bold')
+            for pl in sp.point_loads:
                 xp = xo(cum[i] + pl.position_m)
                 ax.annotate('', xy=(xp, yb + 0.003), xytext=(xp, yb + 0.062),
                             arrowprops=dict(arrowstyle='-|>', lw=1.6, color='#8B1E2E', mutation_scale=11))
                 ax.text(xp, yb + 0.064, pl.label, ha='center', va='bottom', fontsize=7.2,
                         color='#8B1E2E', fontweight='bold')
-        st["y"] = yb - 0.075
+
+        def dim(x0_, x1_, y_, text, color):
+            ax.annotate('', xy=(x1_, y_), xytext=(x0_, y_), arrowprops=dict(arrowstyle='<->', lw=0.7, color=color))
+            ax.plot([x0_, x0_], [y_ - 0.004, y_ + 0.004], color=color, lw=0.7)
+            ax.plot([x1_, x1_], [y_ - 0.004, y_ + 0.004], color=color, lw=0.7)
+            ax.text((x0_ + x1_) / 2, y_ - 0.005, text, ha='center', va='top', fontsize=7, color=color)
+
+        y1 = yb - 0.047
+        if has_pl:     # tier 1: point-load positions from the supports; tier 2: spans
+            pts = sorted(set([round(c_, 6) for c_ in cum] +
+                             [round(cum[i] + pl.position_m, 6) for i, sp in enumerate(self.spans)
+                              for pl in sp.point_loads]))
+            for a_, b_ in zip(pts[:-1], pts[1:]):
+                dim(xo(a_), xo(b_), y1, f"{b_ - a_:.2f} m", '#333333')
+            y2 = y1 - 0.028
+        else:          # no point loads: a single dimension line for the spans
+            y2 = y1
+        for i, sp in enumerate(self.spans):
+            narrow = (xo(cum[i + 1]) - xo(cum[i])) < 0.13
+            dim(xo(cum[i]), xo(cum[i + 1]), y2,
+                (f"S{i+1} = {sp.length_m:.2f} m" if narrow else f"Span {i+1} = {sp.length_m:.2f} m"), BLUE)
+        st["y"] = y2 - 0.035
 
         # ================= SLAB LOADING (grouped) =================
         section_title("SLAB LOADING")
@@ -1237,17 +1282,38 @@ class BeamSystem:
               [0.16, 0.28, 0.2, 0.18, 0.18],
               ref="Shared supports\ncombine reactions\nfrom both spans.")
 
-        # ================= OUTPUT DIAGRAM (inside the same title-block page layout) =================
-        DH = 5.2 / PAGE_H_IN
-        ensure_space(DH + 0.07)
-        section_title("OUTPUT — LOAD & REACTION DIAGRAM")
-        dw = RIGHT - LEFT - 0.02
-        st["ax"].add_patch(patches.Rectangle((LEFT + 0.001, st["y"] - DH), RIGHT - LEFT - 0.002, DH,
-                                              facecolor='white', edgecolor='none', zorder=4))
-        dax = st["ax"].inset_axes([LEFT + 0.01, st["y"] - DH, dw, DH])
-        dax.set_zorder(5)
-        self._draw_diagram(dax, dw * PAGE_W_IN, title=False)
-        st["y"] -= DH
+        # ================= OUTPUT DIAGRAM (own page: no inner borders, centred; rotated if long) =================
+        import io
+        import numpy as np
+        new_page(columns=False)
+        area_top, area_bot = ROWS[3], 0.04
+        ymid = (area_top + area_bot) / 2
+        Ltot_ = sum(sp.length_m for sp in self.spans)
+        min_span_ = min([sp.length_m for sp in self.spans] + [Ltot_])
+        portrait_w_in = (RIGHT - LEFT - 0.04) * PAGE_W_IN
+        too_long = min_span_ * portrait_w_in / (Ltot_ + 1.6) < 1.15
+        if not too_long:
+            DH = 4.4 / PAGE_H_IN
+            dw = RIGHT - LEFT - 0.04
+            st["ax"].text(0.5, area_top - 0.025, "OUTPUT — LOAD & REACTION DIAGRAM", fontsize=11,
+                          fontweight='bold', ha='center', va='center', color=BLUE)
+            dax = st["ax"].inset_axes([(1 - dw) / 2, ymid - DH / 2 + 0.018, dw, DH])
+            self._draw_diagram(dax, dw * PAGE_W_IN, title=False)
+        else:
+            # long beam: draw the diagram landscape, rotate it 90 degrees and centre it on the page
+            LEN_IN, SHORT_IN = 9.8, 6.0
+            tf = plt.figure(figsize=(LEN_IN, SHORT_IN))
+            tax = tf.add_axes([0.02, 0.02, 0.96, 0.88])
+            self._draw_diagram(tax, LEN_IN * 0.96, title=True)
+            buf = io.BytesIO()
+            tf.savefig(buf, format='png', dpi=300, facecolor='white')
+            plt.close(tf)
+            buf.seek(0)
+            img = np.rot90(plt.imread(buf, format='png'))
+            w_, h_ = SHORT_IN / PAGE_W_IN, LEN_IN / PAGE_H_IN
+            iax = st["ax"].inset_axes([(1 - w_) / 2, ymid - h_ / 2, w_, h_])
+            iax.imshow(img, aspect='auto', interpolation='lanczos')
+            iax.axis('off')
 
         with PdfPages(filename) as pdf:
             for n, f in enumerate(pages, 1):
