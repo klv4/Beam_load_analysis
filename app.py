@@ -147,7 +147,9 @@ for i in range(1, int(n_panels) + 1):
                               primary_edge, primary_edge_is_ly,
                               partition_floor_ht_m=pfl, partition_depth_m=pdp,
                               arrow_perpendicular=arrow_perpendicular, arrow_flip=arrow_flip,
-                              rib_lx_m=rib_lx)
+                              rib_lx_m=rib_lx,
+                              finishes_label=FINISHES_OPTIONS[fin_key][0],
+                              live_label=LIVE_LOAD_OPTIONS[live_key][0])
 
         if slab_type == "solid":
             ec1, ec2 = st.columns([1, 1])
@@ -287,8 +289,7 @@ st.table(span_rows)
 st.subheader("Total support reactions")
 totals = beam.support_reactions()
 rows = [{"Support": lbl, "Gₖ (kN)": round(totals[lbl]['dead'], 3),
-         "Qₖ (kN)": round(totals[lbl]['live'], 3),
-         "Total (kN)": round(totals[lbl]['dead'] + totals[lbl]['live'], 3)} for lbl in labels]
+         "Qₖ (kN)": round(totals[lbl]['live'], 3)} for lbl in labels]
 st.table(rows)
 
 # ---------------- Step 11: diagram ----------------

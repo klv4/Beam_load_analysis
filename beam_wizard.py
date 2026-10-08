@@ -63,7 +63,7 @@ def ask_choice(prompt, options: dict, default_key=None):
         if raw == "" and default_key:
             raw = default_key
         if raw in options:
-            return options[raw][1]
+            return options[raw]
         print("  Invalid option, try again.")
 
 
@@ -145,8 +145,8 @@ def run_wizard():
               f"  ->  {spanning} spanning slab")
 
         # ---------------- STEP 4: design criteria & load selection ----------------
-        finishes = ask_choice("    Finishes:", FINISHES_OPTIONS, default_key="2")
-        live = ask_choice("    Live load:", LIVE_LOAD_OPTIONS, default_key="2")
+        finishes_label, finishes = ask_choice("    Finishes:", FINISHES_OPTIONS, default_key="2")
+        live_label, live = ask_choice("    Live load:", LIVE_LOAD_OPTIONS, default_key="2")
         has_partition = ask_yesno("    Partition wall on this panel?", "n")
         plen = pthk = pht = pfl = pdp = 0.0
         if has_partition:
@@ -226,7 +226,8 @@ def run_wizard():
                                   has_partition, plen, pthk, pht, slab_type, edge_continuous,
                                   primary_edge, primary_edge_is_ly,
                                   arrow_perpendicular=arrow_perpendicular, arrow_flip=arrow_flip,
-                                  rib_lx_m=rib_lx, partition_floor_ht_m=pfl, partition_depth_m=pdp)
+                                  rib_lx_m=rib_lx, partition_floor_ht_m=pfl, partition_depth_m=pdp,
+                                  finishes_label=finishes_label, live_label=live_label)
         if slab_type != "solid":
             pn = panels[name]
             print(f"      -> factor = {pn.distribution_factor(primary_edge):.2f}, "

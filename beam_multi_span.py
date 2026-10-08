@@ -287,6 +287,8 @@ class SlabPanel:
     rib_lx_m: float = 0.525             # ribbed, ribs parallel to the beam: load width lx (m)
     partition_floor_ht_m: float = 0.0   # floor height used to derive partition_ht_m
     partition_depth_m: float = 0.0      # slab depth deducted from the floor height
+    finishes_label: str = ""            # e.g. "Residential Areas (Screed and Tiles)" — shown in the PDF
+    live_label: str = ""                # e.g. "Offices & Bed Areas" — shown in the PDF
 
     def __post_init__(self):
         # partition wall height = floor height - slab depth (when those are supplied)
@@ -942,6 +944,37 @@ class BeamSystem:
         def chars_for(fs, width_frac):
             return max(20, int(width_frac * PAGE_W_IN / (0.56 * fs / 72.0)))
 
+        def _rl(t):   # rendered length: a $...$ subscript group draws as ~1 character
+            return len(re.sub(r'\$[^$]*\$', 'X', t))
+
+        def wrap_out(out):
+            """Wrap Output-column text so every line fits inside the column (~17 characters)."""
+            res = []
+            for ln in out.split("\n"):
+                cur = ""
+                for w in ln.split(" "):
+                    cand = (cur + " " + w) if cur else w
+                    if _rl(cand) <= 17 or not cur:
+                        cur = cand
+                    else:
+                        res.append(cur)
+                        cur = w
+                res.append(cur)
+            return res
+
+        def fit(h, ref="", out=""):
+            """Start a new page unless the text (h tall) AND its side notes fit above the bottom border."""
+            n_o = len(wrap_out(sub(out))) if out else 0
+            n_r = len(sub(ref).split("\n")) if ref else 0
+            y = st["y"]
+            lows = [y - h]
+            if n_o:
+                lows.append(min(y, st["out_y"]) - n_o * 0.0135)
+            if n_r:
+                lows.append(min(y, st["ref_y"]) - n_r * 0.0125)
+            if min(lows) < BOTTOM:
+                new_page()
+
         def side(ref="", out="", yy=None):
             # side notes never reserve vertical space; a note that would overlap the
             # previous one in its column is nudged down beneath it instead.
@@ -952,21 +985,17 @@ class BeamSystem:
                 ax.text(LEFT + 0.004, yr, ref, fontsize=6.8, color='#666666', style='italic', va='top')
                 st["ref_y"] = yr - (ref.count("\n") + 1) * 0.0125 - 0.004
             if out:
-                def _rl(t):   # rendered length: a $...$ subscript group draws as ~1 character
-                    return len(re.sub(r'\$[^$]*\$', 'X', t))
-                out = "\n".join(
-                    w for ln in out.split("\n")
-                    for w in ([ln] if _rl(ln) <= 21 else (textwrap.wrap(ln, 24, break_long_words=False) or [""])))
+                lines_ = wrap_out(out)
                 yo = min(y, st["out_y"])
-                ax.text(X1 + 0.01, yo, out, fontsize=7.6, color=BLUE, fontweight='bold', va='top')
-                st["out_y"] = yo - (out.count("\n") + 1) * 0.0135 - 0.004
+                ax.text(X1 + 0.01, yo, "\n".join(lines_), fontsize=7.6, color=BLUE, fontweight='bold', va='top')
+                st["out_y"] = yo - len(lines_) * 0.0135 - 0.004
 
         def line(txt, indent=0.0, bold=False, fs=7.8, ref="", out="", color='black'):
             txt = sub(txt)
             wrapped = textwrap.wrap(txt, chars_for(fs, X1 - X0 - indent), subsequent_indent="    ",
                                     break_long_words=False, break_on_hyphens=False) or [""]
             need = len(wrapped) * STEP
-            ensure_space(need)
+            fit(need, ref, out)
             ax = st["ax"]
             side(ref, out)
             for k, w in enumerate(wrapped):
@@ -975,7 +1004,7 @@ class BeamSystem:
             st["y"] -= len(wrapped) * STEP
 
         def heading(txt, ref="", out=""):
-            ensure_space(STEP * 2)
+            fit(STEP * 2, ref, out)
             ax = st["ax"]
             side(ref, out)
             txt = sub(txt)
@@ -1002,7 +1031,7 @@ class BeamSystem:
             rows = [[sub(str(c)) for c in r] for r in rows]
             n_rows = len(rows) + 1
             height = row_h * n_rows
-            ensure_space(height + 0.01)
+            fit(height + 0.01, ref, output)
             ax = st["ax"]
             y0 = st["y"] - height
             side(ref, output)
@@ -1029,7 +1058,7 @@ class BeamSystem:
                 wrapped += textwrap.wrap(sub(ln), cw, subsequent_indent="   ", break_long_words=False,
                                          break_on_hyphens=False) or [""]
             h = max(SK_H, len(wrapped) * STEP) + 0.01
-            ensure_space(h)
+            fit(h, ref, out)
             ax = st["ax"]
             side(ref, out)
             sax = ax.inset_axes([X0, st["y"] - SK_H, SK_W, SK_H])
@@ -1038,6 +1067,16 @@ class BeamSystem:
                 ax.text(tx, st["y"] - k * STEP, w, fontsize=7.6, va='top',
                         fontweight='bold' if k == 0 else 'normal')
             st["y"] -= h
+
+        def type_txt(label, value, options):
+            """'  (Residential Areas, Screed and Tiles)' — the type of load used. Falls back to a
+            lookup by value only when that is unambiguous."""
+            if not label:
+                hits = [lb for lb, v in options.values() if v == value]
+                label = hits[0] if len(hits) == 1 else ""
+            if not label:
+                return ""
+            return "   (" + label.replace(" (", ", ").replace(")", "") + ")"
 
         def num_of(txt):
             m = re.search(r'\d+(\.\d+)?', str(txt))
@@ -1148,7 +1187,8 @@ class BeamSystem:
         section_title("SLAB LOADING")
         groups = {}
         for pid, pn in self.panels.items():
-            key = (pn.thickness_mm, pn.finishes_kNm2, pn.live_kNm2, pn.has_partition,
+            key = (pn.thickness_mm, pn.finishes_kNm2, pn.live_kNm2, pn.finishes_label, pn.live_label,
+                   pn.has_partition,
                    (pn.partition_len_m, pn.partition_thk_m, pn.partition_ht_m, pn.partition_floor_ht_m,
                     pn.partition_depth_m, pn.ly_m, pn.lx_m)
                    if pn.has_partition else None)
@@ -1162,7 +1202,8 @@ class BeamSystem:
                  out=("Panel" + ("s " if len(ids) > 1 else " ") + ", ".join(str(i) for i in ids)
                       + f":\nnGk = {G:.2f} kN/m²\nnQk = {Q:.2f} kN/m²"))
             line(f"Self weight = {pn.thickness_mm/1000:g} × {dc.concrete_density:g} = {sw:.2f} kN/m²", indent=0.06)
-            line(f"Finishes = {pn.finishes_kNm2:g} kN/m²", indent=0.06)
+            line(f"Finishes = {pn.finishes_kNm2:g} kN/m²{type_txt(pn.finishes_label, pn.finishes_kNm2, FINISHES_OPTIONS)}",
+                 indent=0.06)
             if pn.has_partition:
                 if pn.partition_floor_ht_m > 0:
                     line(f"Partition wall height = floor height − slab depth = {pn.partition_floor_ht_m:g} − "
@@ -1171,7 +1212,8 @@ class BeamSystem:
                      f" × {dc.wall_density:g}) / ({pn.ly_m:g} × {pn.lx_m:g}) = {part:.2f} kN/m²", indent=0.06)
             else:
                 line("Partitions = 0 kN/m²", indent=0.06)
-            line(f"Live loads, Qk = {pn.live_kNm2:g} kN/m²", bold=True)
+            line(f"Live loads, Qk = {pn.live_kNm2:g} kN/m²{type_txt(pn.live_label, pn.live_kNm2, LIVE_LOAD_OPTIONS)}",
+                 bold=True)
             line("Factored loads:", bold=True, ref="EN 1990-1:2002\nTable A1.2(B)")
             line(f"nGk = {dc.factor_selfweight_partition:g}({sw:.2f} + {part:.2f}) + "
                  f"{dc.factor_finishes:g}({pn.finishes_kNm2:g}) = {G:.2f} kN/m²", indent=0.06)
@@ -1275,11 +1317,9 @@ class BeamSystem:
         rows = []
         for idx, lbl in enumerate(labels):
             d, l = totals[lbl]['dead'], totals[lbl]['live']
-            rows.append([lbl, self.support_condition_label(idx), f"{d:.2f}", f"{l:.2f}", f"{d+l:.2f}"])
-        gd = sum(v['dead'] for v in totals.values()); gl = sum(v['live'] for v in totals.values())
-        rows.append(["Beam Total", "", f"{gd:.2f}", f"{gl:.2f}", f"{gd+gl:.2f}"])
-        table(["Support", "Condition", "Dead nGk (kN)", "Live nQk (kN)", "Total (kN)"], rows,
-              [0.16, 0.28, 0.2, 0.18, 0.18],
+            rows.append([lbl, self.support_condition_label(idx), f"{d:.2f}", f"{l:.2f}"])
+        table(["Support", "Condition", "Dead nGk (kN)", "Live nQk (kN)"], rows,
+              [0.2, 0.34, 0.23, 0.23],
               ref="Shared supports\ncombine reactions\nfrom both spans.")
 
         # ================= OUTPUT DIAGRAM (own page: no inner borders, centred; rotated if long) =================
