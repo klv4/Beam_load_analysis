@@ -39,11 +39,14 @@ project = ProjectInfo(
     checked_by=c2.text_input("Checked by"),
     date=c1.text_input("Date"),
     revision=c2.text_input("Revision", value="A"),
-    element=c1.text_input("Element (e.g. 'Second Floor Beam SF9')"),
-    location=c2.text_input("Location"),
-    material=c1.text_input("Material / beam ID"),
-    calc_sheet_no=c2.text_input("Calculation sheet No."),
+    element=c1.text_input("Element (e.g. 'Continuous Beam F3')"),
+    along_grid=c2.text_input("Grid reference — along grid (e.g. '1')"),
+    between_grids=c1.text_input("Grid reference — between grids (e.g. 'D/1 and G/1')"),
+    material=c2.text_input("Material / beam ID"),
+    calc_sheet_no=c1.text_input("Calculation sheet No."),
 )
+if project.drawing_title():
+    st.caption(f"Calculation title:  **{project.drawing_title()}**")
 
 # ---------------- Step 2: spans ----------------
 st.header("2. Spans")

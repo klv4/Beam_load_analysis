@@ -104,7 +104,8 @@ def run_wizard():
         revision=ask_str("  Revision", default="A"),
         element=ask_str("  Element (e.g. 'Second Floor Beam SF9')"),
         beam_type=ask_str("  Beam type (blank = automatic)", default=""),
-        location=ask_str("  Location (e.g. 'Along Grid 3/A-C')"),
+        along_grid=ask_str("  Grid reference — along grid (e.g. '1')"),
+        between_grids=ask_str("  Grid reference — between grids (e.g. 'D/1 and G/1')"),
         material=ask_str("  Material / beam ID"),
     )
 

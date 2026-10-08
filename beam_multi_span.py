@@ -70,8 +70,21 @@ class ProjectInfo:
     revision: str = ""
     element: str = ""              # e.g. "Second Floor Beam SF9"
     beam_type: str = ""
-    location: str = ""             # e.g. "Along Grid 3/A-C"
+    along_grid: str = ""           # grid reference, part 1:  e.g. "1"
+    between_grids: str = ""        # grid reference, part 2:  e.g. "D/1 and G/1"
     material: str = ""             # e.g. "Beam 9"
+
+    def drawing_title(self) -> str:
+        """e.g. 'CONTINUOUS BEAM F3 ALONG GRID 1 BETWEEN GRIDS D/1 AND G/1' — built from the
+        element field plus the two-part grid reference."""
+        def clean(t, word):
+            return re.sub(rf'^\s*{word}\s+', '', (t or '').strip(), flags=re.IGNORECASE)
+        parts = [(self.element or "").strip()]
+        if (self.along_grid or "").strip():
+            parts.append(f"ALONG GRID {clean(self.along_grid, 'grid')}")
+        if (self.between_grids or "").strip():
+            parts.append(f"BETWEEN GRIDS {clean(self.between_grids, 'grids?')}")
+        return " ".join(x for x in parts if x).upper()
 
 
 # ============================================================
@@ -889,11 +902,27 @@ class BeamSystem:
                 ax.add_patch(patches.Rectangle((x0, y0), x1 - x0, y1 - y0, facecolor='none',
                                                 edgecolor='black', lw=0.9, zorder=3))
 
+            rend = fig.canvas.get_renderer()
+            inv = ax.transData.inverted()
+
+            def fit_text(t, maxw, min_fs=5.0):
+                """Shrink (then truncate with an ellipsis) so the text never leaves its cell."""
+                def w_():
+                    bb = t.get_window_extent(rend)
+                    return inv.transform((bb.x1, 0))[0] - inv.transform((bb.x0, 0))[0]
+                while w_() > maxw and t.get_fontsize() > min_fs:
+                    t.set_fontsize(t.get_fontsize() - 0.5)
+                txt = t.get_text()
+                while w_() > maxw and len(txt) > 3:
+                    txt = txt[:-2]
+                    t.set_text(txt.rstrip() + "…")
+
             def cell(x0, y0, x1, y1, label, value, vfs=8, bold=True):
                 box(x0, y0, x1, y1)
                 ax.text(x0 + 0.004, y1 - 0.003, label, fontsize=5.8, fontweight='bold', color='#444444', va='top')
-                ax.text((x0 + x1) / 2, y0 + (y1 - y0) * 0.36, value, fontsize=vfs, ha='center', va='center',
-                        fontweight='bold' if bold else 'normal')
+                t = ax.text((x0 + x1) / 2, y0 + (y1 - y0) * 0.36, value, fontsize=vfs, ha='center', va='center',
+                            fontweight='bold' if bold else 'normal')
+                fit_text(t, (x1 - x0) - 0.012)
 
             # logo cell
             box(LEFT, ROWS[3], XL, ROWS[0])
@@ -904,13 +933,15 @@ class BeamSystem:
                 iax.imshow(logo_img); iax.axis('off')
                 ty = ROWS[0] - 0.004 - hh - 0.003
             else:
-                ax.text((LEFT + XL) / 2, ROWS[0] - 0.006, p.firm_name, fontsize=8, fontweight='bold',
-                        ha='center', va='top')
+                tt = ax.text((LEFT + XL) / 2, ROWS[0] - 0.006, p.firm_name, fontsize=8, fontweight='bold',
+                             ha='center', va='top')
+                fit_text(tt, (XL - LEFT) - 0.01)
                 ty = ROWS[0] - 0.024
             for k, t in enumerate([p.address, f"Tel: {p.tel}" if p.tel else "",
                                    f"Email: {p.email}" if p.email else ""]):
                 if t:
-                    ax.text((LEFT + XL) / 2, ty - k * 0.0085, t, fontsize=5.2, ha='center', va='top')
+                    tt = ax.text((LEFT + XL) / 2, ty - k * 0.0085, t, fontsize=5.2, ha='center', va='top')
+                    fit_text(tt, (XL - LEFT) - 0.01, min_fs=4.0)
             # title rows
             cell(XL, ROWS[1], 0.78, ROWS[0], "Project Title:", p.project_title or p.element, vfs=10)
             cell(0.78, ROWS[1], RIGHT, ROWS[0], "Job No:", p.job_no, vfs=8.5)
@@ -1084,12 +1115,40 @@ class BeamSystem:
 
         new_page()
 
-        # ================= Project details (title block is on every page) =================
-        nsp = len(self.spans)
-        btype = p.beam_type or ("Continuous beam" if nsp > 1 else "Single-span beam")
-        table(["Element", "Beam type", "Spans", "Location", "Material / ID", "Revision"],
-              [[p.element, btype, str(nsp), p.location, p.material, p.revision]],
-              [0.22, 0.17, 0.08, 0.2, 0.18, 0.15], row_h=0.021, fontsize=7.3)
+        # ================= Element title (bold, underlined) =================
+        ttl = p.drawing_title()
+        if ttl:
+            axp, fig_ = st["ax"], st["fig"]
+            rend = fig_.canvas.get_renderer()
+            inv = axp.transData.inverted()
+            maxw = (X1 - X0) - 0.02
+
+            def extent(txt, fs):
+                t_ = axp.text(0, 0, txt, fontsize=fs, fontweight='bold')
+                bb = t_.get_window_extent(rend)
+                t_.remove()
+                return inv.transform((bb.x0, bb.y0))[0], inv.transform((bb.x1, bb.y1))[0]
+
+            width_of = lambda txt, fs: (lambda e: e[1] - e[0])(extent(txt, fs))
+            title_lines, fs_t = [ttl], None
+            for fs in (10.5, 10, 9.5, 9, 8.5):          # one line if it fits at a sensible size
+                if width_of(ttl, fs) <= maxw:
+                    fs_t = fs
+                    break
+            if fs_t is None:                            # otherwise two balanced lines, shrunk to fit
+                fs_t = 9.5
+                title_lines = textwrap.wrap(ttl, width=len(ttl) // 2 + 6, break_long_words=False)
+                while max(width_of(l_, fs_t) for l_ in title_lines) > maxw and fs_t > 6.5:
+                    fs_t -= 0.5
+            ensure_space(len(title_lines) * 0.026 + 0.03)
+            xc = (X0 + X1) / 2
+            for l_ in title_lines:
+                axp.text(xc, st["y"], l_, fontsize=fs_t, fontweight='bold', ha='center', va='top')
+                ux0, ux1 = extent(l_, fs_t)
+                axp.plot([xc - (ux1 - ux0) / 2, xc + (ux1 - ux0) / 2], [st["y"] - 0.0145] * 2,
+                         color='black', lw=1.0)
+                st["y"] -= 0.026
+            st["y"] -= 0.014
 
         # ================= DESIGN CRITERIA (first) =================
         section_title("DESIGN CRITERIA & MATERIALS")
