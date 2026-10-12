@@ -86,6 +86,18 @@ class ProjectInfo:
         """'F3' (a leading 'Beam' typed by the user is ignored)."""
         return self._clean(self.beam_name, 'beams?').upper()
 
+    def beam_full(self, upper: bool = True) -> str:
+        """The beam name with the word 'beam' added ONLY if the name does not already contain it:
+        'F3' -> 'BEAM F3';  'Flat Beam F3' -> 'FLAT BEAM F3' (never 'BEAM FLAT BEAM F3')."""
+        raw = (self.beam_name or "").strip()
+        if not raw:
+            return ""
+        if re.search(r'\bbeams?\b', raw, flags=re.IGNORECASE):
+            full = raw
+        else:
+            full = "Beam " + raw
+        return full.upper() if upper else full
+
     def element_text(self) -> str:
         """'FIRST FLOOR (+3000) BEAM F3' — floor + (floor height) + BEAM + beam name."""
         if not (self.floor.strip() or self.floor_height.strip() or self.beam_name.strip()):
@@ -98,22 +110,23 @@ class ProjectInfo:
             if h[0] not in "+-±":
                 h = "+" + h
             parts.append(f"({h})")
-        if self.beam_label():
-            parts.append(f"BEAM {self.beam_label()}")
+        if self.beam_full():
+            parts.append(self.beam_full())
         return " ".join(parts)
 
     def pdf_filename(self) -> str:
-        """Default PDF name = the beam name, e.g. 'Beam F3.pdf'."""
-        if not self.beam_label():
+        """Default PDF name = the beam name as typed ('F3' -> 'Beam F3.pdf', 'Flat Beam F3' ->
+        'Flat Beam F3.pdf')."""
+        if not self.beam_full():
             return "beam_report.pdf"
-        return re.sub(r'[\\/:*?"<>|]', "-", f"Beam {self.beam_label()}") + ".pdf"
+        return re.sub(r'[\\/:*?"<>|]', "-", self.beam_full(upper=False)) + ".pdf"
 
     def drawing_title(self, beam_kind: str = "") -> str:
         """e.g. 'CONTINUOUS BEAM F3 ALONG GRID 1 BETWEEN GRIDS D/1 AND G/1'.
         beam_kind is 'CONTINUOUS' or 'SIMPLY SUPPORTED' (decided from the number of spans)."""
         clean = self._clean
-        if self.beam_label():
-            parts = [f"{beam_kind} BEAM {self.beam_label()}".strip()]
+        if self.beam_full():
+            parts = [f"{beam_kind} {self.beam_full()}".strip()]
         else:
             parts = [(self.element or "").strip()]
         if (self.along_grid or "").strip():
@@ -1476,7 +1489,7 @@ class BeamSystem:
             iax.axis('off')
 
         filename = filename or self.project.pdf_filename()
-        meta = {"Title": (f"Beam {p.beam_label()}" if p.beam_label() else (p.element_text() or "Beam report")),
+        meta = {"Title": (p.pdf_filename()[:-4] if p.beam_full() else (p.element_text() or "Beam report")),
                 "Author": p.designer or p.firm_name, "Subject": p.drawing_title(self.beam_kind())}
         with PdfPages(filename, metadata=meta) as pdf:
             for n, f in enumerate(pages, 1):
