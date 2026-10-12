@@ -96,13 +96,15 @@ def run_wizard():
         tel=ask_str("  Tel", default=ProjectInfo().tel),
         email=ask_str("  Email", default=ProjectInfo().email),
         project_title=ask_str("  Project title"),
-        checked_by=ask_str("  Checked by"),
+        checked_by=ask_str("  Checked by", default=ProjectInfo().checked_by),
         job_no=ask_str("  Job No."),
         calc_sheet_no=ask_str("  Calculation Sheet No."),
         designer=ask_str("  Designer/Engineer"),
-        date=ask_str("  Date"),
+        date=ask_str("  Date (dd/mm/yyyy)", default=ProjectInfo().date),
         revision=ask_str("  Revision", default="A"),
-        element=ask_str("  Element (e.g. 'Second Floor Beam SF9')"),
+        floor=ask_str("  Floor (e.g. 'First Floor')"),
+        floor_height=ask_str("  Floor height / level in mm (e.g. '+3000')"),
+        beam_name=ask_str("  Beam name (e.g. 'F3')"),
         beam_type=ask_str("  Beam type (blank = automatic)", default=""),
         along_grid=ask_str("  Grid reference — along grid (e.g. '1')"),
         between_grids=ask_str("  Grid reference — between grids (e.g. 'D/1 and G/1')"),
@@ -333,7 +335,7 @@ def run_wizard():
     # ---------------- STEP 12: PDF report ----------------
     make_pdf = ask_yesno("\nSTEP 10 — Generate a PDF report?", "y")
     if make_pdf:
-        pdf_path = beam.generate_pdf("beam_report.pdf")
+        pdf_path = beam.generate_pdf(project.pdf_filename())
         print(f"  PDF report saved to: {pdf_path}")
 
     return beam

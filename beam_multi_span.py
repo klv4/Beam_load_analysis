@@ -25,6 +25,7 @@ Engineering model
 """
 
 from dataclasses import dataclass, field
+import datetime
 import math
 import os
 import re
@@ -62,29 +63,71 @@ class ProjectInfo:
     email: str = "info@infrasengineering.com"
     logo_path: str = ""            # blank -> logo.png in the same folder as this module
     project_title: str = ""        # shown in the title block
-    checked_by: str = ""
+    checked_by: str = "Eng. S. Muiruri"
     job_no: str = ""
     calc_sheet_no: str = ""
     designer: str = ""
-    date: str = ""
+    date: str = field(default_factory=lambda: datetime.date.today().strftime("%d/%m/%Y"))
     revision: str = ""
-    element: str = ""              # e.g. "Second Floor Beam SF9"
+    element: str = ""              # legacy free-text element; used only when floor / beam name are blank
+    floor: str = ""                # e.g. "First Floor"
+    floor_height: str = ""         # level in mm, e.g. "+3000"
+    beam_name: str = ""            # e.g. "F3"
     beam_type: str = ""
     along_grid: str = ""           # grid reference, part 1:  e.g. "1"
     between_grids: str = ""        # grid reference, part 2:  e.g. "D/1 and G/1"
     material: str = ""             # e.g. "Beam 9"
 
-    def drawing_title(self) -> str:
-        """e.g. 'CONTINUOUS BEAM F3 ALONG GRID 1 BETWEEN GRIDS D/1 AND G/1' — built from the
-        element field plus the two-part grid reference."""
-        def clean(t, word):
-            return re.sub(rf'^\s*{word}\s+', '', (t or '').strip(), flags=re.IGNORECASE)
-        parts = [(self.element or "").strip()]
+    @staticmethod
+    def _clean(t: str, word: str) -> str:
+        return re.sub(rf'^\s*{word}\s+', '', (t or '').strip(), flags=re.IGNORECASE)
+
+    def beam_label(self) -> str:
+        """'F3' (a leading 'Beam' typed by the user is ignored)."""
+        return self._clean(self.beam_name, 'beams?').upper()
+
+    def element_text(self) -> str:
+        """'FIRST FLOOR (+3000) BEAM F3' — floor + (floor height) + BEAM + beam name."""
+        if not (self.floor.strip() or self.floor_height.strip() or self.beam_name.strip()):
+            return (self.element or "").strip().upper()
+        parts = []
+        if self.floor.strip():
+            parts.append(self.floor.strip().upper())
+        h = self.floor_height.strip().strip("()")
+        if h:
+            if h[0] not in "+-±":
+                h = "+" + h
+            parts.append(f"({h})")
+        if self.beam_label():
+            parts.append(f"BEAM {self.beam_label()}")
+        return " ".join(parts)
+
+    def pdf_filename(self) -> str:
+        """Default PDF name = the beam name, e.g. 'Beam F3.pdf'."""
+        if not self.beam_label():
+            return "beam_report.pdf"
+        return re.sub(r'[\\/:*?"<>|]', "-", f"Beam {self.beam_label()}") + ".pdf"
+
+    def drawing_title(self, beam_kind: str = "") -> str:
+        """e.g. 'CONTINUOUS BEAM F3 ALONG GRID 1 BETWEEN GRIDS D/1 AND G/1'.
+        beam_kind is 'CONTINUOUS' or 'SIMPLY SUPPORTED' (decided from the number of spans)."""
+        clean = self._clean
+        if self.beam_label():
+            parts = [f"{beam_kind} BEAM {self.beam_label()}".strip()]
+        else:
+            parts = [(self.element or "").strip()]
         if (self.along_grid or "").strip():
             parts.append(f"ALONG GRID {clean(self.along_grid, 'grid')}")
         if (self.between_grids or "").strip():
             parts.append(f"BETWEEN GRIDS {clean(self.between_grids, 'grids?')}")
         return " ".join(x for x in parts if x).upper()
+
+
+def beam_kind(n_spans: int, start_cond: str = "Pin", end_cond: str = "Pin") -> str:
+    """Wording used in the calculation title."""
+    if n_spans > 1:
+        return "CONTINUOUS"
+    return "CANTILEVER" if "Cantilever" in (start_cond, end_cond) else "SIMPLY SUPPORTED"
 
 
 # ============================================================
@@ -93,12 +136,14 @@ class ProjectInfo:
 FINISHES_OPTIONS = {
     "1": ("Open Areas (APP & Interlocking Blocks)", 2.5),
     "2": ("Residential Areas (Screed and Tiles)", 1.5),
+    "3": ("Iron Sheets", 0.15),
 }
 LIVE_LOAD_OPTIONS = {
     "1": ("Open Areas (Water tanks / Solar Panels)", 5.0),
     "2": ("Residential Areas (General occupancy)", 1.5),
     "3": ("Offices & Bed Areas", 2.5),
     "4": ("Corridors", 5.0),
+    "5": ("Iron Sheets", 0.6),
 }
 
 
@@ -353,7 +398,7 @@ class SlabPanel:
     def describe_bearing(self, edge: str) -> List[str]:
         """Worked-calculation lines describing how this panel bears on the beam (for the PDF)."""
         ly, lx = self.ly_m, self.lx_m
-        head = f"Panel {self.panel_id}: {self.thickness_mm:g} mm, bears on beam via {edge} edge"
+        head = f"Panel {self.panel_id}: {self.thickness_mm:g} mm"
         if self.slab_type == "solid":
             ratio = self.spanning_ratio()
             is_ly = edge in self.ly_edges()
@@ -371,12 +416,12 @@ class SlabPanel:
         if self.slab_type == "ribbed":
             why = ("lx = panel length along the ribs" if self.arrow_perpendicular
                    else "lx = rib load width")
-            return [head, f"Ribbed slab, ribs span (double arrow) {rel} to the beam",
+            return [head, "Ribbed slab",
                     f"Panel size: ly = {ly:.3f} m, lx = {lx:.3f} m",
                     "w = 0.5 · n · lx", f"lx = {self.load_width_m():.3f} m  ({why})"]
         why = ("lx = cantilever projection, all load to beam" if self.arrow_perpendicular
                else "beam along loading direction, lx = shortest panel dimension")
-        return [head, f"Cantilever slab, loading direction (single arrow) {rel} to the beam",
+        return [head, "Cantilever slab",
                 f"Panel size: ly = {ly:.3f} m, lx = {lx:.3f} m",
                 f"w = {self.distribution_factor(edge):.1f} · n · lx", f"lx = {self.load_width_m():.3f} m  ({why})"]
 
@@ -862,7 +907,11 @@ class BeamSystem:
 
 
     # -------------------- STEP 12: PDF report (calculation-sheet style) --------------------
-    def generate_pdf(self, filename: str = "beam_report.pdf") -> str:
+    def beam_kind(self) -> str:
+        return beam_kind(len(self.spans), self.spans[0].left_condition if self.spans else "Pin",
+                         self.spans[-1].right_condition if self.spans else "Pin")
+
+    def generate_pdf(self, filename: str = "") -> str:
         """Calculation-sheet PDF: design criteria first, then slab loading, wall loading,
         then per-span panel sketches with worked calculations, support reactions with
         worked steps, totals and the load/reaction diagram. Design Ref on the left,
@@ -943,11 +992,11 @@ class BeamSystem:
                     tt = ax.text((LEFT + XL) / 2, ty - k * 0.0085, t, fontsize=5.2, ha='center', va='top')
                     fit_text(tt, (XL - LEFT) - 0.01, min_fs=4.0)
             # title rows
-            cell(XL, ROWS[1], 0.78, ROWS[0], "Project Title:", p.project_title or p.element, vfs=10)
+            cell(XL, ROWS[1], 0.78, ROWS[0], "Project Title:", p.project_title or p.element_text(), vfs=10)
             cell(0.78, ROWS[1], RIGHT, ROWS[0], "Job No:", p.job_no, vfs=8.5)
             cell(XL, ROWS[2], 0.62, ROWS[1], "By:", p.designer, vfs=8.5, bold=False)
             cell(0.62, ROWS[2], RIGHT, ROWS[1], "Checked by:", p.checked_by, vfs=8.5, bold=False)
-            cell(XL, ROWS[3], 0.62, ROWS[2], "Calc:", (p.element or "Beam load analysis").upper(), vfs=8)
+            cell(XL, ROWS[3], 0.62, ROWS[2], "Element:", p.element_text() or "BEAM LOAD ANALYSIS", vfs=8)
             cell(0.62, ROWS[3], 0.78, ROWS[2], "Date:", p.date, vfs=8, bold=False)
             cell(0.78, ROWS[3], RIGHT, ROWS[2], "Sheet No:", "", vfs=8)
             if columns:
@@ -959,14 +1008,25 @@ class BeamSystem:
                 # calculation area: outer border + column rules
                 ax.add_patch(patches.Rectangle((LEFT, 0.04), RIGHT - LEFT, ROWS[4] - 0.04, facecolor='none',
                                                 edgecolor='black', lw=0.9, zorder=3))
-                ax.plot([XA, XA], [0.04, ROWS[4]], color='black', lw=0.7, zorder=3)
-                ax.plot([XB, XB], [0.04, ROWS[4]], color='black', lw=0.7, zorder=3)
+                rules = [ax.plot([XA, XA], [0.04, ROWS[4]], color='black', lw=0.7, zorder=3)[0],
+                         ax.plot([XB, XB], [0.04, ROWS[4]], color='black', lw=0.7, zorder=3)[0]]
             else:
+                rules = []
                 # plain page (output diagram): outer border only, no inner rules or column headings
                 ax.add_patch(patches.Rectangle((LEFT, 0.04), RIGHT - LEFT, ROWS[3] - 0.04, facecolor='none',
                                                 edgecolor='black', lw=0.9, zorder=3))
-            st.update(fig=fig, ax=ax, y=TOP, ref_y=2.0, out_y=2.0)
+            st.update(fig=fig, ax=ax, y=TOP, ref_y=2.0, out_y=2.0, rules=rules)
             pages.append(fig)
+
+        def cut_rules(y_top, y_bot):
+            """Remove the References/Calculation/Output column rules between y_top and y_bot
+            (the rules continue above and below that band)."""
+            ax_ = st["ax"]
+            for ln in st.get("rules", []):
+                x_ = ln.get_xdata()[0]
+                ln.set_ydata([y_top, ROWS[4]])
+                ax_.plot([x_, x_], [0.04, y_bot], color='black', lw=0.7, zorder=3)
+            st["rules"] = []
 
         def ensure_space(h):
             if st["y"] - h < BOTTOM:
@@ -1116,7 +1176,7 @@ class BeamSystem:
         new_page()
 
         # ================= Element title (bold, underlined) =================
-        ttl = p.drawing_title()
+        ttl = p.drawing_title(self.beam_kind())
         if ttl:
             axp, fig_ = st["ax"], st["fig"]
             rend = fig_.canvas.get_renderer()
@@ -1150,40 +1210,18 @@ class BeamSystem:
                 st["y"] -= 0.026
             st["y"] -= 0.014
 
-        # ================= DESIGN CRITERIA (first) =================
-        section_title("DESIGN CRITERIA & MATERIALS")
-        fcu = num_of(dc.concrete_grade)
-        fy = "460" if "high" in dc.steel_grade.lower() else None
-        line(f"fcu = {fcu} N/mm²   ({dc.concrete_grade})" if fcu else f"Concrete: {dc.concrete_grade}",
-             ref="BS 8110-1:1997\nTables 3.3 & 3.4")
-        line(f"fy = fyv = {fy} N/mm²   ({dc.steel_grade})" if fy else f"Reinforcement: {dc.steel_grade}")
-        line(f"Exposure condition = {dc.exposure_condition}")
-        line(f"Fire resistance = {dc.fire_resistance_hours:g} hours")
-        line(f"Cover = {dc.concrete_cover_mm:.0f} mm", out=f"Provide {dc.concrete_cover_mm:.0f} mm\ncover")
-        gap(0.6)
-        rows = [
-            ["Concrete density", f"{dc.concrete_density:.0f}", "kN/m³"],
-            ["Wall material density", f"{dc.wall_density:.0f}", "kN/m³"],
-            ["Finishes — " + FINISHES_OPTIONS['1'][0], f"{FINISHES_OPTIONS['1'][1]}", "kN/m²"],
-            ["Finishes — " + FINISHES_OPTIONS['2'][0], f"{FINISHES_OPTIONS['2'][1]}", "kN/m²"],
-            *[[f"Live load — {lb}", f"{v}", "kN/m²"] for lb, v in LIVE_LOAD_OPTIONS.values()],
-            ["Load factor: self-weight / partitions / wall", f"{dc.factor_selfweight_partition}", "-"],
-            ["Load factor: finishes", f"{dc.factor_finishes}", "-"],
-            ["Load factor: live", f"{dc.factor_live}", "-"],
-        ]
-        table(["Parameter", "Value", "Unit"], rows, [0.62, 0.2, 0.18], row_h=0.019,
-              ref="BS 6399-1:1996\nTable 1\nEN 1990-1:2002\nTable A1.2(B)")
-
         # ================= Beam layout =================
-        section_title("BEAM LAYOUT")
         has_pl = any(sp.point_loads for sp in self.spans)
-        ensure_space(0.20)
+        LAY_H = 0.195 if has_pl else 0.167
+        ensure_space(LAY_H + 0.07)                 # keep the heading and the drawing together
+        section_title("BEAM LAYOUT")
+        cut_rules(st["y"], st["y"] - LAY_H)        # no inner borders in this band
         ax = st["ax"]
         cum = [0.0]
         for sp in self.spans:
             cum.append(cum[-1] + sp.length_m)
         Ltot = cum[-1] or 1.0
-        xo = lambda m: X0 + 0.02 + (m / Ltot) * (X1 - X0 - 0.04)
+        xo = lambda m: LEFT + 0.05 + (m / Ltot) * (RIGHT - LEFT - 0.10)     # full page width
         yb = st["y"] - 0.085
         ax.plot([xo(0), xo(Ltot)], [yb, yb], color='black', lw=2.2)
         for k, lbl in enumerate(labels):
@@ -1241,6 +1279,29 @@ class BeamSystem:
             dim(xo(cum[i]), xo(cum[i + 1]), y2,
                 (f"S{i+1} = {sp.length_m:.2f} m" if narrow else f"Span {i+1} = {sp.length_m:.2f} m"), BLUE)
         st["y"] = y2 - 0.035
+
+        # ================= DESIGN CRITERIA (first) =================
+        section_title("DESIGN CRITERIA & MATERIALS")
+        fcu = num_of(dc.concrete_grade)
+        fy = "460" if "high" in dc.steel_grade.lower() else None
+        line(f"fcu = {fcu} N/mm²   ({dc.concrete_grade})" if fcu else f"Concrete: {dc.concrete_grade}",
+             ref="BS 8110-1:1997\nTables 3.3 & 3.4")
+        line(f"fy = fyv = {fy} N/mm²   ({dc.steel_grade})" if fy else f"Reinforcement: {dc.steel_grade}")
+        line(f"Exposure condition = {dc.exposure_condition}")
+        line(f"Fire resistance = {dc.fire_resistance_hours:g} hours")
+        line(f"Cover = {dc.concrete_cover_mm:.0f} mm", out=f"Provide {dc.concrete_cover_mm:.0f} mm\ncover")
+        gap(0.6)
+        rows = [
+            ["Concrete density", f"{dc.concrete_density:.0f}", "kN/m³"],
+            ["Wall material density", f"{dc.wall_density:.0f}", "kN/m³"],
+            *[[f"Finishes — {lb}", f"{v}", "kN/m²"] for lb, v in FINISHES_OPTIONS.values()],
+            *[[f"Live load — {lb}", f"{v}", "kN/m²"] for lb, v in LIVE_LOAD_OPTIONS.values()],
+            ["Load factor: self-weight / partitions / wall", f"{dc.factor_selfweight_partition}", "-"],
+            ["Load factor: finishes", f"{dc.factor_finishes}", "-"],
+            ["Load factor: live", f"{dc.factor_live}", "-"],
+        ]
+        table(["Parameter", "Value", "Unit"], rows, [0.62, 0.2, 0.18], row_h=0.019,
+              ref="BS 6399-1:1996\nTable 1\nEN 1990-1:2002\nTable A1.2(B)")
 
         # ================= SLAB LOADING (grouped) =================
         section_title("SLAB LOADING")
@@ -1414,7 +1475,10 @@ class BeamSystem:
             iax.imshow(img, aspect='auto', interpolation='lanczos')
             iax.axis('off')
 
-        with PdfPages(filename) as pdf:
+        filename = filename or self.project.pdf_filename()
+        meta = {"Title": (f"Beam {p.beam_label()}" if p.beam_label() else (p.element_text() or "Beam report")),
+                "Author": p.designer or p.firm_name, "Subject": p.drawing_title(self.beam_kind())}
+        with PdfPages(filename, metadata=meta) as pdf:
             for n, f in enumerate(pages, 1):
                 f.axes[0].text((0.78 + RIGHT) / 2, ROWS[3] + 0.0075, f"{n} of {len(pages)}", fontsize=8.5,
                                fontweight='bold', ha='center', va='center')

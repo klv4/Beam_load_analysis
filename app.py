@@ -9,13 +9,14 @@ Opens at http://localhost:8501 in your browser.
 Put this file in the SAME folder as beam_multi_span.py.
 """
 
+import datetime
 import streamlit as st
 import matplotlib.pyplot as plt
 import matplotlib.patches as patches
 from beam_multi_span import (
     ProjectInfo, DesignCriteria, SlabPanel, WallLoad, PanelContribution, PointLoad,
     Span, BeamSystem, FINISHES_OPTIONS, LIVE_LOAD_OPTIONS, bs8110_classify_panel,
-    panel_sketch_figure,
+    panel_sketch_figure, beam_kind,
 )
 
 st.set_page_config(page_title="Multi-Span Beam Load Analysis", layout="centered")
@@ -36,17 +37,19 @@ project = ProjectInfo(
     project_title=c1.text_input("Project title"),
     job_no=c2.text_input("Job No."),
     designer=c1.text_input("Designed by"),
-    checked_by=c2.text_input("Checked by"),
-    date=c1.text_input("Date"),
+    checked_by=c2.text_input("Checked by", value=_d.checked_by),
+    date=c1.date_input("Date", value=datetime.date.today(), format="DD/MM/YYYY").strftime("%d/%m/%Y"),
     revision=c2.text_input("Revision", value="A"),
-    element=c1.text_input("Element (e.g. 'Continuous Beam F3')"),
-    along_grid=c2.text_input("Grid reference — along grid (e.g. '1')"),
-    between_grids=c1.text_input("Grid reference — between grids (e.g. 'D/1 and G/1')"),
+    floor=c1.text_input("Floor", placeholder="e.g. First Floor"),
+    floor_height=c2.text_input("Floor height / level (mm)", placeholder="e.g. +3000"),
+    beam_name=c1.text_input("Beam name", placeholder="e.g. F3"),
+    along_grid=c2.text_input("Grid reference — along grid", placeholder="e.g. 1"),
+    between_grids=c1.text_input("Grid reference — between grids", placeholder="e.g. D/1 and G/1"),
     material=c2.text_input("Material / beam ID"),
     calc_sheet_no=c1.text_input("Calculation sheet No."),
 )
-if project.drawing_title():
-    st.caption(f"Calculation title:  **{project.drawing_title()}**")
+if project.element_text():
+    st.caption(f"Element:  **{project.element_text()}**")
 
 # ---------------- Step 2: spans ----------------
 st.header("2. Spans")
@@ -64,6 +67,9 @@ c1, c2 = st.columns(2)
 start_cond = c1.selectbox("Condition at FIRST support (start of Span 1)", ["Pin", "Cantilever"])
 end_cond = c2.selectbox("Condition at LAST support (end of last span)", ["Pin", "Cantilever"])
 st.caption("Interior/shared supports are always pinned and continuous.")
+_title = project.drawing_title(beam_kind(int(n_spans), start_cond, end_cond))
+if _title:
+    st.caption(f"Calculation title:  **{_title}**")
 
 # ---------------- Step 3 & 4: slab panels ----------------
 st.header("3. Slab panels & design criteria")
@@ -306,6 +312,7 @@ with st.expander("Full text summary"):
 # ---------------- Step 12: PDF report ----------------
 st.header("8. PDF report")
 if st.button("Generate PDF report"):
-    pdf_path = beam.generate_pdf("beam_report.pdf")
+    pdf_name = project.pdf_filename()          # e.g. "Beam F3.pdf"
+    pdf_path = beam.generate_pdf(pdf_name)
     with open(pdf_path, "rb") as f:
-        st.download_button("Download PDF report", f, file_name="beam_report.pdf", mime="application/pdf")
+        st.download_button("Download PDF report", f, file_name=pdf_name, mime="application/pdf")
