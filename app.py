@@ -10,17 +10,102 @@ Put this file in the SAME folder as beam_multi_span.py.
 """
 
 import datetime
+import hashlib
+import json
 import streamlit as st
 import matplotlib.pyplot as plt
 import matplotlib.patches as patches
 from beam_multi_span import (
     ProjectInfo, DesignCriteria, SlabPanel, WallLoad, PanelContribution, PointLoad,
     Span, BeamSystem, FINISHES_OPTIONS, LIVE_LOAD_OPTIONS, bs8110_classify_panel,
-    panel_sketch_figure, beam_kind,
+    panel_sketch_figure, beam_kind, encode_project_state, decode_project_state,
 )
 
 st.set_page_config(page_title="Multi-Span Beam Load Analysis", layout="centered")
 st.title("Multi-span beam — load analysis")
+
+# ======================================================================
+# Save / reopen a project:  every input widget goes through W(), which
+#  - remembers the widget key so its value can be saved, and
+#  - pre-fills the widget from a loaded project (link or .json file).
+# ======================================================================
+st.session_state.setdefault("_loaded", {})
+st.session_state["_reg_prev"] = st.session_state.get("_reg", {})
+st.session_state["_reg"] = {}
+
+
+def W(where, kind, label, *args, key=None, **kw):
+    if key is not None and not kw.get("disabled"):
+        st.session_state["_reg"][key] = kind
+        loaded = st.session_state["_loaded"]
+        if key in loaded:
+            v = loaded[key]
+            if kind in ("text_input", "number_input", "checkbox"):
+                kw["value"] = v
+            elif kind == "date_input":
+                kw["value"] = datetime.date.fromisoformat(v)
+            elif kind in ("selectbox", "radio"):
+                opts = list(kw.get("options", args[0] if args else []))
+                if v in opts:
+                    kw["index"] = opts.index(v)
+    return getattr(where, kind)(label, *args, key=key, **kw)
+
+
+def _collect_values():
+    out = {}
+    for k in st.session_state["_reg"]:
+        if k in st.session_state:
+            v = st.session_state[k]
+            out[k] = v.isoformat() if isinstance(v, datetime.date) else v
+    return out
+
+
+def _load_values(values):
+    """Replace the current inputs with a saved project."""
+    for k in list(st.session_state.get("_reg_prev", {})):
+        if k in st.session_state:
+            del st.session_state[k]
+    st.session_state["_loaded"] = values
+
+
+def _detect_base_url():
+    try:
+        u = st.context.url
+        if u:
+            return str(u).split("?")[0].rstrip("/")
+    except Exception:
+        pass
+    try:
+        host = st.context.headers.get("Host", "")
+        if host:
+            return ("http://" if host.startswith(("localhost", "127.")) else "https://") + host
+    except Exception:
+        pass
+    return ""
+
+
+_tok = st.query_params.get("p")
+if _tok and st.session_state.get("_p_used") != _tok:
+    try:
+        st.session_state["_loaded"] = decode_project_state(_tok)
+        st.session_state["_p_used"] = _tok
+        st.query_params.clear()
+    except Exception:
+        st.error("This project link could not be read — it may be incomplete or damaged.")
+
+with st.expander("Open a saved project"):
+    _up = st.file_uploader("Project file (.json) saved from this app", type=["json"], key="proj_upload")
+    if _up is not None:
+        _h = hashlib.md5(_up.getvalue()).hexdigest()
+        if st.session_state.get("_upl_hash") != _h:
+            try:
+                _data = json.loads(_up.getvalue().decode("utf-8"))
+                _load_values(_data.get("values", _data))
+                st.session_state["_upl_hash"] = _h
+                st.rerun()
+            except json.JSONDecodeError:
+                st.error("That file is not a valid project file.")
+
 
 
 dc = DesignCriteria()
@@ -30,30 +115,30 @@ st.header("1. Project information")
 c1, c2 = st.columns(2)
 _d = ProjectInfo()
 project = ProjectInfo(
-    firm_name=c1.text_input("Firm name", value=_d.firm_name),
-    address=c2.text_input("Address", value=_d.address),
-    tel=c1.text_input("Tel", value=_d.tel),
-    email=c2.text_input("Email", value=_d.email),
-    project_title=c1.text_input("Project title"),
-    job_no=c2.text_input("Job No."),
-    designer=c1.text_input("Designed by"),
-    checked_by=c2.text_input("Checked by", value=_d.checked_by),
-    date=c1.date_input("Date", value=datetime.date.today(), format="DD/MM/YYYY").strftime("%d/%m/%Y"),
-    revision=c2.text_input("Revision", value="A"),
-    floor=c1.text_input("Floor", placeholder="e.g. First Floor"),
-    floor_height=c2.text_input("Floor height / level (mm)", placeholder="e.g. +3000"),
-    beam_name=c1.text_input("Beam name", placeholder="e.g. F3"),
-    along_grid=c2.text_input("Grid reference — along grid", placeholder="e.g. 1"),
-    between_grids=c1.text_input("Grid reference — between grids", placeholder="e.g. D/1 and G/1"),
-    material=c2.text_input("Material / beam ID"),
-    calc_sheet_no=c1.text_input("Calculation sheet No."),
+    firm_name=W(c1, "text_input", "Firm name", value=_d.firm_name, key="proj_firm"),
+    address=W(c2, "text_input", "Address", value=_d.address, key="proj_address"),
+    tel=W(c1, "text_input", "Tel", value=_d.tel, key="proj_tel"),
+    email=W(c2, "text_input", "Email", value=_d.email, key="proj_email"),
+    project_title=W(c1, "text_input", "Project title", key="proj_title"),
+    job_no=W(c2, "text_input", "Job No.", key="proj_job"),
+    designer=W(c1, "text_input", "Designed by", key="proj_designer"),
+    checked_by=W(c2, "text_input", "Checked by", value=_d.checked_by, key="proj_checked"),
+    date=W(c1, "date_input", "Date", value=datetime.date.today(), format="DD/MM/YYYY", key="proj_date").strftime("%d/%m/%Y"),
+    revision=W(c2, "text_input", "Revision", value="A", key="proj_rev"),
+    floor=W(c1, "text_input", "Floor", placeholder="e.g. First Floor", key="proj_floor"),
+    floor_height=W(c2, "text_input", "Floor height / level (mm)", placeholder="e.g. +3000", key="proj_floor_h"),
+    beam_name=W(c1, "text_input", "Beam name", placeholder="e.g. F3", key="proj_beam"),
+    along_grid=W(c2, "text_input", "Grid reference — along grid", placeholder="e.g. 1", key="proj_grid_a"),
+    between_grids=W(c1, "text_input", "Grid reference — between grids", placeholder="e.g. D/1 and G/1", key="proj_grid_b"),
+    material=W(c2, "text_input", "Material / beam ID", key="proj_material"),
+    calc_sheet_no=W(c1, "text_input", "Calculation sheet No.", key="proj_calc_no"),
 )
 if project.element_text():
     st.caption(f"Element:  **{project.element_text()}**")
 
 # ---------------- Step 2: spans ----------------
 st.header("2. Spans")
-n_spans = st.number_input("Number of spans", min_value=1, value=2, step=1)
+n_spans = W(st, "number_input", "Number of spans", min_value=1, value=2, step=1, key="n_spans")
 lengths = []
 ROW_SIZE = 6  # wrap span-length inputs into rows so large counts stay usable
 for row_start in range(0, int(n_spans), ROW_SIZE):
@@ -61,11 +146,11 @@ for row_start in range(0, int(n_spans), ROW_SIZE):
     cols = st.columns(len(row_indices))
     for col, i in zip(cols, row_indices):
         with col:
-            lengths.append(st.number_input(f"Span {i+1} length (m)", min_value=0.1, value=3.0 + i, step=0.1, key=f"L{i}"))
+            lengths.append(W(st, "number_input", f"Span {i+1} length (m)", min_value=0.1, value=3.0 + i, step=0.1, key=f"L{i}"))
 
 c1, c2 = st.columns(2)
-start_cond = c1.selectbox("Condition at FIRST support (start of Span 1)", ["Pin", "Cantilever"])
-end_cond = c2.selectbox("Condition at LAST support (end of last span)", ["Pin", "Cantilever"])
+start_cond = W(c1, "selectbox", "Condition at FIRST support (start of Span 1)", ["Pin", "Cantilever"], key="start_cond")
+end_cond = W(c2, "selectbox", "Condition at LAST support (end of last span)", ["Pin", "Cantilever"], key="end_cond")
 st.caption("Interior/shared supports are always pinned and continuous.")
 _title = project.drawing_title(beam_kind(int(n_spans), start_cond, end_cond))
 if _title:
@@ -73,22 +158,22 @@ if _title:
 
 # ---------------- Step 3 & 4: slab panels ----------------
 st.header("3. Slab panels & design criteria")
-n_panels = st.number_input("Number of slab panels", min_value=1, value=3, step=1)
+n_panels = W(st, "number_input", "Number of slab panels", min_value=1, value=3, step=1, key="n_panels")
 panels = {}
 fin_labels = {k: v[0] for k, v in FINISHES_OPTIONS.items()}
 live_labels = {k: v[0] for k, v in LIVE_LOAD_OPTIONS.items()}
 used_names = set()
 for i in range(1, int(n_panels) + 1):
     default_name = f"P{i}"
-    name = st.text_input(f"Panel {i} — name/ID", value=default_name, key=f"pname{i}")
+    name = W(st, "text_input", f"Panel {i} — name/ID", value=default_name, key=f"pname{i}")
     if name in used_names:
         st.warning(f"'{name}' is already used by another panel — please make it unique.")
     used_names.add(name)
     with st.expander(f"Panel: {name}", expanded=(i <= 2)):
         c1, c2, c3 = st.columns(3)
-        t = c1.number_input("Thickness (mm)", value=200, key=f"pt{i}")
-        ly = c2.number_input("ly — long dimension (m)", value=5.0, key=f"ply{i}")
-        lx = c3.number_input("lx — short dimension (m)", value=2.0, key=f"plx{i}")
+        t = W(c1, "number_input", "Thickness (mm)", value=200, key=f"pt{i}")
+        ly = W(c2, "number_input", "ly — long dimension (m)", value=5.0, key=f"ply{i}")
+        lx = W(c3, "number_input", "lx — short dimension (m)", value=2.0, key=f"plx{i}")
         if lx > ly:
             ly, lx = lx, ly
             st.info(f"ly must be the longer dimension — swapped automatically: ly={ly:g} m, lx={lx:g} m")
@@ -97,19 +182,19 @@ for i in range(1, int(n_panels) + 1):
         st.caption(f"ly/lx = {ratio:.2f}  ->  {'\u2264 2.0' if spanning=='Two-way' else '> 2.0'}  ->  "
                    f"**{spanning} spanning slab**")
         c4, c5 = st.columns(2)
-        fin_key = c4.selectbox("Finishes", options=list(FINISHES_OPTIONS.keys()),
+        fin_key = W(c4, "selectbox", "Finishes", options=list(FINISHES_OPTIONS.keys()),
                                 format_func=lambda k: fin_labels[k], key=f"pfin{i}")
-        live_key = c5.selectbox("Live load", options=list(LIVE_LOAD_OPTIONS.keys()),
+        live_key = W(c5, "selectbox", "Live load", options=list(LIVE_LOAD_OPTIONS.keys()),
                                  format_func=lambda k: live_labels[k], key=f"pliv{i}")
-        has_partition = st.checkbox("Partition wall on this panel?", key=f"ppart{i}")
+        has_partition = W(st, "checkbox", "Partition wall on this panel?", key=f"ppart{i}")
         plen = pthk = pht = pfl = pdp = 0.0
         if has_partition:
             c6, c7 = st.columns(2)
-            plen = c6.number_input("Partition length (m)", value=5.0, key=f"pplen{i}")
-            pthk = c7.number_input("Partition thickness (m)", value=0.2, key=f"ppthk{i}")
+            plen = W(c6, "number_input", "Partition length (m)", value=5.0, key=f"pplen{i}")
+            pthk = W(c7, "number_input", "Partition thickness (m)", value=0.2, key=f"ppthk{i}")
             c8, c9 = st.columns(2)
-            pfl = c8.number_input("Floor height (m)", value=3.6, step=0.1, key=f"ppfl{i}")
-            pdp = c9.number_input("Slab depth (m)", value=round(t / 1000.0, 3), step=0.05,
+            pfl = W(c8, "number_input", "Floor height (m)", value=3.6, step=0.1, key=f"ppfl{i}")
+            pdp = W(c9, "number_input", "Slab depth (m)", value=round(t / 1000.0, 3), step=0.05,
                                   format="%.3f", key=f"ppdp{i}_{t}")
             pht = max(0.0, pfl - pdp)
             st.caption(f"Partition height = floor height − slab depth = {pfl:g} − {pdp:g} = **{pht:.2f} m**")
@@ -118,16 +203,16 @@ for i in range(1, int(n_panels) + 1):
         type_opts = {"Solid slab (Table 3.15 — one-way uses beta_vx at ly/lx = 2.0)": "solid",
                      "Ribbed slab (factor 0.5, double arrow = rib span)": "ribbed",
                      "Cantilever slab (single arrow = loading direction)": "cantilever"}
-        slab_type = type_opts[st.selectbox("Panel type", list(type_opts.keys()), key=f"pstype{i}")]
+        slab_type = type_opts[W(st, "selectbox", "Panel type", list(type_opts.keys()), key=f"pstype{i}")]
 
         st.markdown("**Panel edge on this beam — orientation**")
         st.caption("Pick the edge of this panel that sits on the beam (reference edge). It is applied "
                    "automatically to 'Panel edge on this beam' under Panel contributions. Also say whether "
                    "that edge is your ly or lx side.")
         oc1, oc2 = st.columns(2)
-        primary_edge = oc1.selectbox("Reference edge", ["top", "bottom", "left", "right"],
+        primary_edge = W(oc1, "selectbox", "Reference edge", ["top", "bottom", "left", "right"],
                                       index=2, key=f"pref{i}")
-        primary_edge_is_ly = oc2.checkbox(f"'{primary_edge}' edge is the ly ({ly:g} m) side",
+        primary_edge_is_ly = W(oc2, "checkbox", f"'{primary_edge}' edge is the ly ({ly:g} m) side",
                                            value=False, key=f"prefly{i}")
         opposite = {"top": "bottom", "bottom": "top", "left": "right", "right": "left"}[primary_edge]
         pair = {primary_edge, opposite}
@@ -139,16 +224,16 @@ for i in range(1, int(n_panels) + 1):
         if slab_type in ("ribbed", "cantilever"):
             what = "Rib spanning direction (double arrow)" if slab_type == "ribbed" \
                 else "Cantilever loading direction (single arrow)"
-            rel = st.radio(f"{what} relative to the reference edge",
+            rel = W(st, "radio", f"{what} relative to the reference edge",
                            ["Perpendicular to the reference edge", "Parallel to the reference edge"],
                            key=f"parrow{i}")
             arrow_perpendicular = rel.startswith("Perpendicular")
             if not arrow_perpendicular:
                 if slab_type == "ribbed":
-                    rib_lx = st.number_input("lx — rib load width (m)", value=0.525, step=0.005,
+                    rib_lx = W(st, "number_input", "lx — rib load width (m)", value=0.525, step=0.005,
                                               format="%.3f", key=f"prib{i}")
                 else:
-                    arrow_flip = st.checkbox("Flip arrow direction (sketch only — no effect on load)",
+                    arrow_flip = W(st, "checkbox", "Flip arrow direction (sketch only — no effect on load)",
                                               key=f"pflip{i}")
 
         panel_obj = SlabPanel(name, t, ly, lx, FINISHES_OPTIONS[fin_key][1], LIVE_LOAD_OPTIONS[live_key][1],
@@ -166,7 +251,7 @@ for i in range(1, int(n_panels) + 1):
                 for edge_key in ("top", "bottom", "left", "right"):
                     dim = "ly" if edge_key in ly_edges else "lx"
                     dim_val = ly if dim == "ly" else lx
-                    edge_continuous[edge_key] = st.checkbox(
+                    edge_continuous[edge_key] = W(st, "checkbox", 
                         f"{edge_key.capitalize()} continuous ({dim} edge, {dim_val:g} m)",
                         value=True, key=f"e{edge_key}{i}")
             with ec2:
@@ -194,12 +279,12 @@ for i in range(1, int(n_panels) + 1):
 
 # ---------------- Step 6: wall ----------------
 st.header("4. Wall loading")
-wall_defined = st.checkbox("Is there direct wall loading on the beam anywhere?")
+wall_defined = W(st, "checkbox", "Is there direct wall loading on the beam anywhere?", key="wall_defined")
 if wall_defined:
     c1, c2, c3 = st.columns(3)
-    wt = c1.number_input("Wall thickness (m)", value=0.2, step=0.05)
-    wfl = c2.number_input("Floor height (m)", value=3.6, step=0.1)
-    wdp = c3.number_input("Beam depth (m)", value=0.45, step=0.05)
+    wt = W(c1, "number_input", "Wall thickness (m)", value=0.2, step=0.05, key="wall_t")
+    wfl = W(c2, "number_input", "Floor height (m)", value=3.6, step=0.1, key="wall_fl")
+    wdp = W(c3, "number_input", "Beam depth (m)", value=0.45, step=0.05, key="wall_dp")
     wall = WallLoad(wt, wfl, wdp)
     st.caption(f"Wall height = floor height − beam depth = {wfl:g} − {wdp:g} = **{wall.height_m:.2f} m**")
     st.caption(f"Factored wall dead load = {wall.factored_dead_kNm(dc):.3f} kN/m (applied where marked present)")
@@ -214,14 +299,14 @@ st.header("5. Load distribution, self-weight and point loads per span")
 for i in range(int(n_spans)):
     with st.expander(f"Span {i+1}  ({labels[i]} -> {labels[i+1]}, {lengths[i]} m)", expanded=(i == 0)):
         st.subheader("Panel contributions")
-        n_c = st.number_input("Number of panel contributions", min_value=0, value=2, step=1, key=f"nc{i}")
+        n_c = W(st, "number_input", "Number of panel contributions", min_value=0, value=2, step=1, key=f"nc{i}")
         contributions = []
         for j in range(int(n_c)):
             c1, c2 = st.columns(2)
-            pid = c1.selectbox("Panel", options=list(panels.keys()), key=f"s{i}c{j}p")
+            pid = W(c1, "selectbox", "Panel", options=list(panels.keys()), key=f"s{i}c{j}p")
             panel = panels[pid]
             edge = panel.primary_edge
-            c2.selectbox("Panel edge on this beam", options=[edge], index=0, disabled=True,
+            W(c2, "selectbox", "Panel edge on this beam", options=[edge], index=0, disabled=True,
                          key=f"s{i}c{j}edge_{pid}_{edge}")
             st.caption("Set from the panel's reference edge (Step 3-4). Contributions sharing the same "
                        "edge are treated as being on the same side of the beam.")
@@ -231,26 +316,26 @@ for i in range(int(n_spans)):
 
         wall_here = False
         if wall_defined:
-            wall_here = st.checkbox("Wall present on this span", key=f"s{i}wall")
+            wall_here = W(st, "checkbox", "Wall present on this span", key=f"s{i}wall")
 
-        self_weight = st.number_input("Element self-weight (kN/m) — added automatically to Gₖ",
+        self_weight = W(st, "number_input", "Element self-weight (kN/m) — added automatically to Gₖ",
                                        value=0.0, step=0.1, key=f"s{i}sw")
 
         st.subheader("Point loads")
-        n_p = st.number_input("Number of point loads", min_value=0, value=0, step=1, key=f"np{i}")
+        n_p = W(st, "number_input", "Number of point loads", min_value=0, value=0, step=1, key=f"np{i}")
         point_loads = []
         for j in range(int(n_p)):
             c1, c2, c3, c4 = st.columns(4)
-            label = c1.text_input("Label", value=f"P{j+1}", key=f"s{i}p{j}lbl")
-            d = c2.number_input("Ngₖ (kN)", value=0.0, step=0.5, key=f"s{i}p{j}d")
-            l = c3.number_input("Nqₖ (kN)", value=0.0, step=0.5, key=f"s{i}p{j}l")
-            x = c4.number_input("Position (m)", value=0.0, step=0.1, key=f"s{i}p{j}x")
+            label = W(c1, "text_input", "Label", value=f"P{j+1}", key=f"s{i}p{j}lbl")
+            d = W(c2, "number_input", "Ngₖ (kN)", value=0.0, step=0.5, key=f"s{i}p{j}d")
+            l = W(c3, "number_input", "Nqₖ (kN)", value=0.0, step=0.5, key=f"s{i}p{j}l")
+            x = W(c4, "number_input", "Position (m)", value=0.0, step=0.1, key=f"s{i}p{j}x")
             eb = eh = el = 0.0
-            if st.checkbox(f"Add self-weight of the element (beam / column) to {label}", key=f"s{i}p{j}sw"):
+            if W(st, "checkbox", f"Add self-weight of the element (beam / column) to {label}", key=f"s{i}p{j}sw"):
                 e1, e2, e3 = st.columns(3)
-                eb = e1.number_input("Width b (mm)", value=200.0, step=25.0, key=f"s{i}p{j}eb") / 1000.0
-                eh = e2.number_input("Depth h (mm)", value=450.0, step=25.0, key=f"s{i}p{j}eh") / 1000.0
-                el = e3.number_input("Length (m)", value=3.0, step=0.1, key=f"s{i}p{j}el")
+                eb = W(e1, "number_input", "Width b (mm)", value=200.0, step=25.0, key=f"s{i}p{j}eb") / 1000.0
+                eh = W(e2, "number_input", "Depth h (mm)", value=450.0, step=25.0, key=f"s{i}p{j}eh") / 1000.0
+                el = W(e3, "number_input", "Length (m)", value=3.0, step=0.1, key=f"s{i}p{j}el")
             pl = PointLoad(label, d, l, x, eb, eh, el, dc.concrete_density, dc.factor_selfweight_partition)
             if pl.self_weight_kN:
                 st.caption(f"Self-weight = {dc.factor_selfweight_partition:g} × {eb:g} × {eh:g} × {el:g} × "
@@ -310,9 +395,35 @@ with st.expander("Full text summary"):
     st.code(beam.tabulate())
 
 # ---------------- Step 12: PDF report ----------------
-st.header("8. PDF report")
+st.header("8. PDF report & saved project")
+pdf_name = project.pdf_filename()          # e.g. "Beam F3.pdf"
+stem = pdf_name[:-4]
 if st.button("Generate PDF report"):
-    pdf_name = project.pdf_filename()          # e.g. "Beam F3.pdf"
     pdf_path = beam.generate_pdf(pdf_name)
     with open(pdf_path, "rb") as f:
         st.download_button("Download PDF report", f, file_name=pdf_name, mime="application/pdf")
+
+st.subheader("Save this project")
+st.caption("Save your inputs so you can reopen and edit them later without typing everything again.")
+_values = _collect_values()
+_base = st.text_input("Your app's web address (used inside the link)", value=_detect_base_url(), key="app_base_url",
+                      placeholder="https://your-app.streamlit.app")
+sc1, sc2, sc3 = st.columns(3)
+if _base.strip():
+    _url = f"{_base.strip().rstrip('/')}/?p={encode_project_state(_values)}"
+    sc1.download_button("Project link (.url)", f"[InternetShortcut]\r\nURL={_url}\r\n",
+                        file_name=f"{stem} (open in app).url", mime="text/plain")
+    sc2.download_button(
+        "Project link (.html)",
+        f'<!doctype html><meta charset="utf-8"><meta http-equiv="refresh" content="0;url={_url}">'
+        f'<title>{stem}</title><p><a href="{_url}">Open {stem} in the beam load analysis app</a></p>',
+        file_name=f"{stem} (open in app).html", mime="text/html")
+    if len(_url) > 6000:
+        st.warning("This project is large, so the link may be too long for some browsers. "
+                   "Use the project file (.json) instead — open it with 'Open a saved project' at the top.")
+else:
+    st.info("Type your app's web address above to create a clickable project link. "
+            "You can always use the project file (.json).")
+sc3.download_button("Project file (.json)",
+                    json.dumps({"app": "beam-load-analysis", "version": 1, "values": _values}, indent=1),
+                    file_name=f"{stem} - project.json", mime="application/json")

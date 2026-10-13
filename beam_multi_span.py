@@ -25,10 +25,13 @@ Engineering model
 """
 
 from dataclasses import dataclass, field
+import base64
 import datetime
+import json
 import math
 import os
 import re
+import zlib
 from typing import List, Dict, Tuple, Optional
 import matplotlib
 matplotlib.use("Agg")
@@ -134,6 +137,22 @@ class ProjectInfo:
         if (self.between_grids or "").strip():
             parts.append(f"BETWEEN GRIDS {clean(self.between_grids, 'grids?')}")
         return " ".join(x for x in parts if x).upper()
+
+
+def encode_project_state(values: dict) -> str:
+    """Compress the app's saved inputs into a short URL-safe token (used in the project link)."""
+    raw = json.dumps(values, separators=(",", ":"), sort_keys=True, default=str).encode("utf-8")
+    return base64.urlsafe_b64encode(zlib.compress(raw, 9)).decode("ascii")
+
+
+def decode_project_state(token: str) -> dict:
+    """Inverse of encode_project_state."""
+    token = token.strip()
+    raw = zlib.decompress(base64.urlsafe_b64decode(token + "=" * (-len(token) % 4)))
+    data = json.loads(raw.decode("utf-8"))
+    if not isinstance(data, dict):
+        raise ValueError("not a project state")
+    return data
 
 
 def beam_kind(n_spans: int, start_cond: str = "Pin", end_cond: str = "Pin") -> str:
