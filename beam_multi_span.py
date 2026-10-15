@@ -807,127 +807,159 @@ class BeamSystem:
         return "\n".join(out)
 
     # -------------------- STEP 11: graphical output --------------------
+    # ------------------------------------------------------------------
+    # Load & reaction diagram.  All VERTICAL layout is done in real inches (1 y-unit = 1 inch) so
+    # text can never overlap vertically; point-load labels that would collide horizontally are
+    # automatically stacked on higher levels.
+    # ------------------------------------------------------------------
+    def _diagram_layout(self, width_in, title=True):
+        spans = self.spans
+        cum = [0.0]
+        for s in spans:
+            cum.append(cum[-1] + s.length_m)
+        Ltot = cum[-1] or 1.0
+        PAD_IN = 0.75                                        # side room for the end reaction texts
+        in_per_m = max(0.05, (width_in - 2 * PAD_IN) / Ltot)
+        min_span = min(s.length_m for s in spans)
+        fscale = max(0.72, min(1.0, min_span * in_per_m / 1.3))
+        fs_r = max(5.0, min(8.5, 8.5 * min_span * in_per_m / 1.35))
+
+        mags = [s.udl_dead + s.udl_live for s in spans]
+        max_mag = max(mags) if max(mags) > 0 else 1.0
+        block_in = [0.35 + 0.9 * (m / max_mag) for m in mags]
+
+        # point-load labels: (x_m, label text, width_m)
+        def rlen(t):
+            return len(re.sub(r'\$[^$]*\$', 'X', t))
+        items = []
+        for i, s in enumerate(spans):
+            for pl in s.point_loads:
+                l1 = pl.label
+                l2 = f"{sub('Gk')}={pl.total_dead_kN:.1f}  {sub('Qk')}={pl.live_kN:.1f} kN"
+                w_in = max(rlen(l1), rlen(l2)) * 7.4 * fscale * 0.62 / 72 + 0.12
+                items.append((cum[i] + pl.position_m, l1 + "\n" + l2, w_in / in_per_m, pl))
+        items.sort(key=lambda t: t[0])
+        levels = []                       # each level = list of (x0, x1)
+        placed = []                       # (x, text, level, pl)
+        for x, txt, w_m, pl in items:
+            lv = 0
+            while True:
+                if lv == len(levels):
+                    levels.append([])
+                if all(x + w_m / 2 <= a or x - w_m / 2 >= b for a, b in levels[lv]):
+                    break
+                lv += 1
+            levels[lv].append((x - w_m / 2, x + w_m / 2))
+            placed.append((x, txt, lv, pl))
+        n_levels = len(levels)
+        LEVEL_STEP = 0.40
+        base_lab = max(block_in) + 0.55
+        top_lab = base_lab + n_levels * LEVEL_STEP if n_levels else 0.0
+        top_udl = max(block_in) + 0.50
+        above = max(top_lab, top_udl) + 0.15 + (0.45 if title else 0.0)
+
+        has_pl = bool(items)
+        ARROW = 0.32
+        y_text = -(ARROW + 0.08)
+        y_dim1 = y_text - 0.62 - 0.15
+        y_dim2 = y_dim1 - 0.40
+        below = -(y_dim2 if has_pl else y_dim1) + 0.40
+        return dict(cum=cum, Ltot=Ltot, in_per_m=in_per_m, PAD_IN=PAD_IN, fscale=fscale, fs_r=fs_r,
+                    block_in=block_in, placed=placed, base_lab=base_lab, LEVEL_STEP=LEVEL_STEP,
+                    above=above, below=below, has_pl=has_pl, ARROW=ARROW, y_text=y_text,
+                    y_dim1=y_dim1, y_dim2=y_dim2)
+
+    def diagram_size_in(self, width_in, title=True):
+        """Height (inches) the diagram needs when drawn width_in wide."""
+        d = self._diagram_layout(width_in, title)
+        return d["above"] + d["below"]
+
     def figure(self):
         """Standalone matplotlib Figure/Axes for the beam diagram (live vector plot)."""
         Ltot = sum(s.length_m for s in self.spans)
         W = max(7.0, Ltot * 1.7)
-        fig, ax = plt.subplots(figsize=(W, 6.6))
+        H = self.diagram_size_in(W, True)
+        fig = plt.figure(figsize=(W, H))
+        ax = fig.add_axes([0, 0, 1, 1])
         self._draw_diagram(ax, W, title=True)
-        fig.tight_layout()
         return fig, ax
 
     def _draw_diagram(self, ax, width_in, title=True):
-        """Draws the load & reaction diagram on `ax` (width_in = drawn width in inches).
-        Supports are small upward arrows with the reaction R (support letter as a
-        subscript), nG_k and nQ_k written directly beneath. Dimension lines: one line
-        (spans) when there are no point loads; two tiers (point-load positions, then
-        spans) when there are. UDL blocks have no arrows."""
+        """Draws the diagram on `ax`, which must be width_in x diagram_size_in(width_in) inches.
+        Supports are small upward arrows with R (support letter subscripted), nG_k, nQ_k beneath.
+        Dimension lines: one tier (spans) with no point loads; two tiers (point-load positions,
+        then spans) with point loads. UDL blocks have no arrows."""
+        d = self._diagram_layout(width_in, title)
         labels = self.support_labels()
-        cum = [0.0]
-        for s in self.spans:
-            cum.append(cum[-1] + s.length_m)
-        Ltot = cum[-1]
+        cum, Ltot, ipm, fscale, fs_r = d["cum"], d["Ltot"], d["in_per_m"], d["fscale"], d["fs_r"]
         totals = self.support_reactions()
-        n_spans = len(self.spans)
-        has_pl = any(s.point_loads for s in self.spans)
-
-        # stepped UDL blocks: each span's block height reflects its own nG_k + nQ_k
-        mags = [s.udl_dead + s.udl_live for s in self.spans]
-        max_mag = max(mags) if mags and max(mags) > 0 else 1.0
-        block_h = [0.6 + 1.8 * (m / max_mag) for m in mags]
-
-        min_span = min([s.length_m for s in self.spans] + [Ltot]) if n_spans else 1.0
-        in_per_m = width_in / (Ltot + 1.6)
-        fscale = max(0.72, min(1.0, min_span * in_per_m / 1.3))
-        fs_r = max(5.5, min(8.5, 8.5 * min_span * in_per_m / 1.35))
-
-        ARROW_L = 0.5
-        y_text = -ARROW_L - 0.1
-        y_dim1 = y_text - 3 * 0.3 - 0.3
-        y_dim2 = y_dim1 - 0.42
-        y_last = y_dim2 if has_pl else y_dim1
-
-        ax.set_xlim(-0.8, Ltot + 0.8)
-        hs = [1.15, 1.7, 2.25, 2.8]
-        top = max([block_h[i] + (max(hs[j % 4] for j in range(len(s.point_loads))) + 0.8
-                                 if s.point_loads else 0.9)
-                   for i, s in enumerate(self.spans)] + [1.5])
-        ax.set_ylim(y_last - 0.4, top + 0.3)
+        block_in, has_pl = d["block_in"], d["has_pl"]
+        pad_m = d["PAD_IN"] / ipm
+        ax.set_xlim(-pad_m, Ltot + pad_m)
+        ax.set_ylim(-d["below"], d["above"])
         ax.axis('off')
 
-        BEAM_Y, BEAM_H = 0, max(0.012 * Ltot, 0.025)
-        ax.add_patch(patches.Rectangle((0, BEAM_Y - BEAM_H / 2), Ltot, BEAM_H,
-                                        facecolor='#F2C9CE', edgecolor='black', zorder=6))
-
-        # ---- supports: small upward arrows + reaction text beneath ----
+        BEAM_H = 0.06
+        ax.add_patch(patches.Rectangle((0, -BEAM_H / 2), Ltot, BEAM_H, facecolor='#F2C9CE',
+                                        edgecolor='black', zorder=6))
+        # ---- supports + reactions ----
         for i, lbl in enumerate(labels):
             x = cum[i]
             free = ((i == 0 and self.spans[0].left_condition == "Cantilever") or
                     (i == len(labels) - 1 and self.spans[-1].right_condition == "Cantilever"))
             if not free:
-                ax.annotate('', xy=(x, -BEAM_H / 2), xytext=(x, -ARROW_L), zorder=7,
+                ax.annotate('', xy=(x, -BEAM_H / 2), xytext=(x, -d["ARROW"]), zorder=7,
                             arrowprops=dict(arrowstyle='-|>', lw=1.7, color='black', mutation_scale=11))
-            ax.text(x, y_text, f"$R_{{{lbl}}}$", ha='center', va='top', fontsize=fs_r + 1.5,
-                    fontweight='bold')
+            ax.text(x, d["y_text"], f"$R_{{{lbl}}}$", ha='center', va='top', fontsize=fs_r + 1.5, fontweight='bold')
             if free:
-                ax.text(x, y_text - 0.34, "free end", ha='center', va='top', fontsize=fs_r - 0.5,
-                        color='#777777')
+                ax.text(x, d["y_text"] - 0.22, "free end", ha='center', va='top', fontsize=fs_r - 0.5, color='#777777')
             else:
-                ax.text(x, y_text - 0.34, f"{sub('nGk')} = {totals[lbl]['dead']:.2f} kN",
+                ax.text(x, d["y_text"] - 0.23, f"{sub('nGk')} = {totals[lbl]['dead']:.2f} kN",
                         ha='center', va='top', fontsize=fs_r, color='#1F4E78')
-                ax.text(x, y_text - 0.64, f"{sub('nQk')} = {totals[lbl]['live']:.2f} kN",
+                ax.text(x, d["y_text"] - 0.43, f"{sub('nQk')} = {totals[lbl]['live']:.2f} kN",
                         ha='center', va='top', fontsize=fs_r, color='#1F4E78')
 
-        # ---- stepped UDL blocks + point loads, per span ----
+        # ---- UDL blocks (no arrows) ----
         for i, s in enumerate(self.spans):
-            x0, x1 = cum[i], cum[i + 1]
-            h = block_h[i]
-            ax.add_patch(patches.Rectangle((x0, BEAM_Y + BEAM_H / 2), x1 - x0, h,
-                                            facecolor='#DCE8F5', edgecolor='#1F4E78', lw=1.3, zorder=2))
-            # keep the UDL label clear of point-load arrows: use the widest free stretch
-            hw = 0.62 * fscale / in_per_m
-            cuts = [x0] + sorted(x0 + p.position_m for p in s.point_loads) + [x1]
-            xlab = (x0 + x1) / 2
-            if any(abs(c - xlab) < hw for c in cuts[1:-1]):
-                a_, b_ = max(zip(cuts[:-1], cuts[1:]), key=lambda t: t[1] - t[0])
-                xlab = (a_ + b_) / 2
-            ax.text(xlab, h + 0.08,
+            x0, x1, h = cum[i], cum[i + 1], block_in[i]
+            ax.add_patch(patches.Rectangle((x0, BEAM_H / 2), x1 - x0, h - BEAM_H / 2, facecolor='#DCE8F5',
+                                            edgecolor='#1F4E78', lw=1.3, zorder=2))
+            ax.text((x0 + x1) / 2, h + 0.04,
                     f"{sub('nGk')} = {s.udl_dead:.2f} kN/m\n{sub('nQk')} = {s.udl_live:.2f} kN/m",
-                    ha='center', va='bottom', fontsize=8.8 * fscale, color='#1F4E78', fontweight='bold')
-            heights = [1.15, 1.7, 2.25, 2.8]
-            for j, p in enumerate(s.point_loads):
-                xp = x0 + p.position_m
-                ph = h + heights[j % len(heights)]
-                ax.annotate('', xy=(xp, BEAM_Y + BEAM_H / 2 + 0.02), xytext=(xp, ph),
-                            arrowprops=dict(arrowstyle='-|>', lw=2.1, color='#8B1E2E', mutation_scale=16))
-                ax.text(xp, ph + 0.06, f"{p.label}: {sub('Gk')}={p.total_dead_kN:.1f} {sub('Qk')}={p.live_kN:.1f} kN",
-                        ha='center', va='bottom', fontsize=7.6 * fscale, color='#8B1E2E', fontweight='bold')
+                    ha='center', va='bottom', fontsize=8.8 * fscale, color='#1F4E78', fontweight='bold',
+                    zorder=6, bbox=dict(facecolor='white', edgecolor='none', pad=1.2, alpha=0.9))
+
+        # ---- point loads: arrow down to the beam, label stacked on its own level ----
+        for x, txt, lv, pl in d["placed"]:
+            y_lab = d["base_lab"] + lv * d["LEVEL_STEP"]
+            ax.annotate('', xy=(x, BEAM_H / 2 + 0.01), xytext=(x, y_lab), zorder=4,
+                        arrowprops=dict(arrowstyle='-|>', lw=1.8, color='#8B1E2E', mutation_scale=13))
+            ax.text(x, y_lab + 0.03, txt, ha='center', va='bottom', fontsize=7.4 * fscale, color='#8B1E2E',
+                    fontweight='bold', zorder=6, linespacing=1.15)
 
         # ---- dimension lines ----
-        def dim_line(x0, x1, y, text, color='#333333'):
-            ax.annotate('', xy=(x1, y), xytext=(x0, y),
-                        arrowprops=dict(arrowstyle='<->', lw=0.8, color=color))
-            ax.plot([x0, x0], [y - 0.07, y + 0.07], color=color, lw=0.8)
-            ax.plot([x1, x1], [y - 0.07, y + 0.07], color=color, lw=0.8)
-            ax.text((x0 + x1) / 2, y - 0.1, text, ha='center', va='top', fontsize=7.6 * fscale, color=color)
+        def dim_line(a, b, y, text, color='#333333'):
+            ax.annotate('', xy=(b, y), xytext=(a, y), arrowprops=dict(arrowstyle='<->', lw=0.8, color=color))
+            ax.plot([a, a], [y - 0.05, y + 0.05], color=color, lw=0.8)
+            ax.plot([b, b], [y - 0.05, y + 0.05], color=color, lw=0.8)
+            ax.text((a + b) / 2, y - 0.07, text, ha='center', va='top', fontsize=7.6 * fscale, color=color)
 
         if has_pl:
-            # Tier 1: positions of the point loads measured from the supports
-            points_x = sorted(set([round(c, 6) for c in cum] +
-                                  [round(cum[i] + p.position_m, 6) for i, s in enumerate(self.spans)
-                                   for p in s.point_loads]))
-            for a, b in zip(points_x[:-1], points_x[1:]):
-                dim_line(a, b, y_dim1, f"{(b - a):.2f} m")
-            # Tier 2: beam spans
+            pts = sorted(set([round(c, 6) for c in cum] +
+                             [round(cum[i] + p.position_m, 6) for i, s in enumerate(self.spans)
+                              for p in s.point_loads]))
+            for a, b in zip(pts[:-1], pts[1:]):
+                dim_line(a, b, d["y_dim1"], f"{(b - a):.2f} m")
             for i, s in enumerate(self.spans):
-                dim_line(cum[i], cum[i + 1], y_dim2, f"Span {i+1} = {s.length_m:.2f} m", color='#1F4E78')
+                dim_line(cum[i], cum[i + 1], d["y_dim2"], f"Span {i+1} = {s.length_m:.2f} m", color='#1F4E78')
         else:
             for i, s in enumerate(self.spans):
-                dim_line(cum[i], cum[i + 1], y_dim1, f"Span {i+1} = {s.length_m:.2f} m", color='#1F4E78')
+                dim_line(cum[i], cum[i + 1], d["y_dim1"], f"Span {i+1} = {s.length_m:.2f} m", color='#1F4E78')
 
         if title:
-            ax.set_title("Beam — Load & Reaction Diagram", fontsize=14, fontweight='bold', pad=14)
-
+            ax.text(Ltot / 2, d["above"] - 0.22, "Beam — Load & Reaction Diagram", ha='center', va='center',
+                    fontsize=14, fontweight='bold')
+        return d["above"] + d["below"]
 
     def plot(self, filename: str = "beam_diagram.svg") -> str:
         """Saves the diagram to a file. Use an .svg (default) or .pdf extension
@@ -1483,27 +1515,32 @@ class BeamSystem:
         Ltot_ = sum(sp.length_m for sp in self.spans)
         min_span_ = min([sp.length_m for sp in self.spans] + [Ltot_])
         portrait_w_in = (RIGHT - LEFT - 0.04) * PAGE_W_IN
-        too_long = min_span_ * portrait_w_in / (Ltot_ + 1.6) < 1.15
+        ipm_ = (portrait_w_in - 1.5) / Ltot_            # inches of page width per metre of beam
+        # rotate when the beam would have to be squeezed below ~0.5 in per metre, or a span gets narrow
+        too_long = ipm_ < 0.5 or min_span_ * ipm_ < 1.15
         if not too_long:
-            DH = 4.4 / PAGE_H_IN
             dw = RIGHT - LEFT - 0.04
+            need = self.diagram_size_in(dw * PAGE_W_IN, False)
+            DH = min(need, (area_top - area_bot - 0.08) * PAGE_H_IN) / PAGE_H_IN
             st["ax"].text(0.5, area_top - 0.025, "OUTPUT — LOAD & REACTION DIAGRAM", fontsize=11,
                           fontweight='bold', ha='center', va='center', color=BLUE)
-            dax = st["ax"].inset_axes([(1 - dw) / 2, ymid - DH / 2 + 0.018, dw, DH])
+            dax = st["ax"].inset_axes([(1 - dw) / 2, ymid - DH / 2 - 0.01, dw, DH])
             self._draw_diagram(dax, dw * PAGE_W_IN, title=False)
         else:
             # long beam: draw the diagram landscape, rotate it 90 degrees and centre it on the page
-            LEN_IN, SHORT_IN = 9.8, 6.0
+            LEN_IN = (area_top - area_bot - 0.06) * PAGE_H_IN          # use (almost) the full page height
+            need = self.diagram_size_in(LEN_IN, True)
+            SHORT_IN = min(need, portrait_w_in)
             tf = plt.figure(figsize=(LEN_IN, SHORT_IN))
-            tax = tf.add_axes([0.02, 0.02, 0.96, 0.88])
-            self._draw_diagram(tax, LEN_IN * 0.96, title=True)
+            tax = tf.add_axes([0, 0, 1, 1])
+            self._draw_diagram(tax, LEN_IN, title=True)
             buf = io.BytesIO()
             tf.savefig(buf, format='png', dpi=300, facecolor='white')
             plt.close(tf)
             buf.seek(0)
             img = np.rot90(plt.imread(buf, format='png'))
             w_, h_ = SHORT_IN / PAGE_W_IN, LEN_IN / PAGE_H_IN
-            iax = st["ax"].inset_axes([(1 - w_) / 2, ymid - h_ / 2, w_, h_])
+            iax = st["ax"].inset_axes([0.5 - w_ / 2, ymid - h_ / 2, w_, h_])
             iax.imshow(img, aspect='auto', interpolation='lanczos')
             iax.axis('off')
 
