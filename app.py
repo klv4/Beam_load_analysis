@@ -10,8 +10,6 @@ Put this file in the SAME folder as beam_multi_span.py.
 """
 
 import datetime
-import hashlib
-import json
 import streamlit as st
 import matplotlib.pyplot as plt
 import matplotlib.patches as patches
@@ -27,7 +25,7 @@ st.title("Multi-span beam — load analysis")
 # ======================================================================
 # Save / reopen a project:  every input widget goes through W(), which
 #  - remembers the widget key so its value can be saved, and
-#  - pre-fills the widget from a loaded project (link or .json file).
+#  - pre-fills the widget when a saved project link (.html) is opened.
 # ======================================================================
 st.session_state.setdefault("_loaded", {})
 st.session_state["_reg_prev"] = st.session_state.get("_reg", {})
@@ -60,14 +58,6 @@ def _collect_values():
     return out
 
 
-def _load_values(values):
-    """Replace the current inputs with a saved project."""
-    for k in list(st.session_state.get("_reg_prev", {})):
-        if k in st.session_state:
-            del st.session_state[k]
-    st.session_state["_loaded"] = values
-
-
 def _detect_base_url():
     try:
         u = st.context.url
@@ -92,21 +82,6 @@ if _tok and st.session_state.get("_p_used") != _tok:
         st.query_params.clear()
     except Exception:
         st.error("This project link could not be read — it may be incomplete or damaged.")
-
-with st.expander("Open a saved project"):
-    _up = st.file_uploader("Project file (.json) saved from this app", type=["json"], key="proj_upload")
-    if _up is not None:
-        _h = hashlib.md5(_up.getvalue()).hexdigest()
-        if st.session_state.get("_upl_hash") != _h:
-            try:
-                _data = json.loads(_up.getvalue().decode("utf-8"))
-                _load_values(_data.get("values", _data))
-                st.session_state["_upl_hash"] = _h
-                st.rerun()
-            except json.JSONDecodeError:
-                st.error("That file is not a valid project file.")
-
-
 
 dc = DesignCriteria()
 
@@ -404,26 +379,18 @@ if st.button("Generate PDF report"):
         st.download_button("Download PDF report", f, file_name=pdf_name, mime="application/pdf")
 
 st.subheader("Save this project")
-st.caption("Save your inputs so you can reopen and edit them later without typing everything again.")
+st.caption("Download a link file: opening it later reopens this app with all your inputs filled in, ready to edit.")
 _values = _collect_values()
 _base = st.text_input("Your app's web address (used inside the link)", value=_detect_base_url(), key="app_base_url",
                       placeholder="https://your-app.streamlit.app")
-sc1, sc2, sc3 = st.columns(3)
 if _base.strip():
     _url = f"{_base.strip().rstrip('/')}/?p={encode_project_state(_values)}"
-    sc1.download_button("Project link (.url)", f"[InternetShortcut]\r\nURL={_url}\r\n",
-                        file_name=f"{stem} (open in app).url", mime="text/plain")
-    sc2.download_button(
-        "Project link (.html)",
+    st.download_button(
+        "Download project link (.html)",
         f'<!doctype html><meta charset="utf-8"><meta http-equiv="refresh" content="0;url={_url}">'
         f'<title>{stem}</title><p><a href="{_url}">Open {stem} in the beam load analysis app</a></p>',
         file_name=f"{stem} (open in app).html", mime="text/html")
     if len(_url) > 6000:
-        st.warning("This project is large, so the link may be too long for some browsers. "
-                   "Use the project file (.json) instead — open it with 'Open a saved project' at the top.")
+        st.warning("This project is large, so the link may be too long for some browsers.")
 else:
-    st.info("Type your app's web address above to create a clickable project link. "
-            "You can always use the project file (.json).")
-sc3.download_button("Project file (.json)",
-                    json.dumps({"app": "beam-load-analysis", "version": 1, "values": _values}, indent=1),
-                    file_name=f"{stem} - project.json", mime="application/json")
+    st.info("Type your app's web address above to create a clickable project link.")
