@@ -381,7 +381,7 @@ if st.button("Generate PDF report"):
 st.subheader("Save this project")
 st.caption("Download a link file: opening it later reopens this app with all your inputs filled in, ready to edit.")
 _values = _collect_values()
-_base = st.text_input("Your app's web address (used inside the link)", value=_detect_base_url(), key="app_base_url",
+_base = st.text_input("App web address", value=_detect_base_url(), key="app_base_url",
                       placeholder="https://your-app.streamlit.app")
 if _base.strip():
     _url = f"{_base.strip().rstrip('/')}/?p={encode_project_state(_values)}"
